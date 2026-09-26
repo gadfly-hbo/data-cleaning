@@ -13,3 +13,10 @@ __pycache__/
 # IDE
 .idea/
 .vscode/
+
+# 运行期数据（引擎安装包、大数据样本、引擎工作区）
+workspace/
+
+# dev-flow 本机状态（持久工件 proposal/prd/tasks 等正常入库）
+.flow/state.json
+
