@@ -1,124 +1,81 @@
-# 数据清洗平台 — 总体设计
+# 数据清洗平台 — 总体设计（v2，开源组装优先）
 
 > 决策日期：2026-09-26。前置调研见 [research.md](research.md)。
 >
-> **定位决策**：通用数据清洗平台，双形态——交互式工作台（面向业务/分析人员）+ 清洗管道（面向数据团队）。
+> **v2 变更**：产品思路对齐 model-mlflow（Model Pack Studio）——自研 TS 产品壳，开源引擎经 adapter 隔离接入，最大化复用、最小化自研。v1 的全自研 FastAPI/Polars 方案降级为引擎层备选内核。
+>
+> **定位**：通用数据清洗平台，双形态——交互式工作台（业务/分析人员）+ 清洗管道（数据团队）。
 
-## 1. 核心设计决策：一个内核，两种形态
+## 1. 产品模式（对齐 model-mlflow）
 
-双形态不是两套系统，而是同一个清洗内核的两种使用方式：
+与 Model Pack Studio 同构：
 
-- **工作台 = 管道的构建器**。用户在工作台里的每一步交互操作（去重、补缺、标准化…）都被记录为算子序列（Recipe）。操作历史即可撤销、可回放、可序列化。
-- **管道 = Recipe 的定版执行**。工作台里调好的 Recipe 一键"提升"为管道：绑定数据源、配置调度、监控运行。管道也可以直接用 JSON/YAML 声明式编写。
-- 工作台是探索态（频繁撤销/重放），管道是生产态（版本化、可调度、有告警），二者共享算子库、规则引擎与执行引擎。
+- **产品壳自研，TypeScript 优先**：Fastify 服务端 + React 19 + Vite 前端，遵循 DESIGN.md（JuanerAI Xanthil）视觉基线。
+- **开源引擎 = 可替换的后端组件**：只经 `adapters/<engine>` 访问，`core/*` 不直接依赖任何引擎；引擎以独立服务/子进程形态存在，与 model-mlflow 中 MLflow 的"证据层"角色同构。
+- **长任务走 Worker Bus**：沿用 model-mlflow 的 worker 模式，API 不阻塞在大计算上。
 
-这套统一模型是整个平台的架构基石，也是与 OpenRefine（只有交互）、GE/Soda（只有管道）拉开差距的根本点。
+## 2. 能力层 → 开源组件映射（核心选型）
 
-## 2. 总体架构
+| 平台能力 | 开源组件 | 许可证 | 集成方式 | 自研部分 |
+|---|---|---|---|---|
+| 交互式清洗引擎（转换/聚类去重/操作历史/GREL） | **OpenRefine** | BSD-3-Clause | headless 部署，HTTP API 驱动 | `adapters/openrefine` 客户端 + 生命周期管理 |
+| 质量规则执行（schema/值域/正则/唯一性） | **pandera** | MIT | Python 子进程桥（同 model-mlflow 形态 B） | `adapters/quality` + 规则 JSON→pandera 映射 |
+| 管道编排与调度 | **Dagster**（M3 引入） | Apache-2.0 | Python 侧 job 封装，studio-api 触发/查询 | Recipe→job 映射、运行视图 |
+| 数据画像 | 薄层自算（Polars） | — | 与 pandera 同一 Python 子进程桥 | 列指标计算（空值率/基数/分位数/top-k） |
+| 模糊实体匹配 | **dedupe**（M4+） | MIT | Python 子进程桥 | 场景化封装 |
+| 多源接入（DB/API） | **SeaTunnel / DataX**（M4+） | Apache-2.0 | 独立同步进程，落文件后进平台 | 源配置 UI |
 
-```
-┌────────────────────────────────────────────────────────┐
-│ Web 前端 (React)                                        │
-│  工作台(表格/算子面板/历史)  管道管理  质量报告  治理视图   │
-├────────────────────────────────────────────────────────┤
-│ API 层 (FastAPI)                                        │
-│  datasets / profiling / rules / recipes / sessions / runs │
-├──────────────┬──────────────────┬───────────────────────┤
-│ 算子库        │ 规则引擎          │ 执行引擎               │
-│ 纯函数算子+    │ 声明式规则(JSON)  │ Polars 惰性求值        │
-│ 参数schema    │ pandera 执行      │ 分块流式·任务队列       │
-├──────────────┴──────────────────┴───────────────────────┤
-│ 存储层                                                  │
-│  数据: Parquet 版本化(不可变)   元数据: SQLite → Postgres │
-└────────────────────────────────────────────────────────┘
-```
+许可证结论（2026-09-26 经 GitHub API 核实）：以上选型全部商用友好。**注意：soda-core 的 LICENSE 实为 Elastic License 2.0**（GitHub 显示 NOASSERTION），禁止作为托管服务提供给第三方，做 SaaS 产品不可用，故规则引擎选 pandera；Great Expectations（Apache-2.0）为备选。
 
-## 3. 领域模型
+## 3. 核心设计决策
 
-| 实体 | 说明 |
-|---|---|
-| Dataset | 逻辑数据集，一个接入单元 |
-| DatasetVersion | 数据的不可变版本；raw 版本只读，清洗产出新版本，血缘 = 版本 DAG |
-| Operator | 清洗算子：纯函数 + JSON 参数 schema + 声明的输入输出影响 |
-| Recipe | 有序算子 DAG + 规则集，版本化 JSON；工作台操作历史的持久化形态 |
-| Session | 工作台会话：数据集版本 + 构建中的 Recipe + 撤销/重放状态 |
-| RuleSet | 声明式质量规则（schema/值域/正则/唯一性/跨列一致性） |
-| QualityReport | 规则执行结果 + 画像摘要，清洗前后可对比 |
-| Run | Recipe 的一次执行实例：日志、耗时、行数变化、产出版本 |
+1. **Recipe ≡ OpenRefine 操作历史 JSON**。工作台里的每步交互操作落为 OpenRefine 原生操作记录，天然获得撤销/重放/导出；"提升为管道"= 该 JSON 定版 + 绑定数据源 + 调度。双形态共享同一引擎，无需自研转换内核。
+2. **引擎只经 adapter 访问**：`adapters/openrefine`、`adapters/quality`、`adapters/pipeline` 各自独立包（src/test/package.json），带契约测试锁住引擎版本行为；引擎可整体替换（含退回 v1 自研 Polars 内核）而不动 `core/*`。
+3. **数据不可变**：原始数据只读，每次清洗/管道运行产出新版本（引擎工作区 + 导出快照双轨）；血缘与审计自然成立。
+4. **OpenRefine 实例隔离**：OpenRefine 无多租户概念，按工作区起独立 headless 实例（studio-api 管生命周期，闲置回收），M1 单用户单实例起步。
+5. **规则声明式**：规则以 JSON 定义与存储，桥内映射 pandera 执行；报告结构化回传（逐规则违反数/率/样例行）。
+6. **大文件策略**：OpenRefine 为内存型引擎，工作台永远操作采样视图，全量处理走 worker + 引擎批量模式；GB 级以上场景后续评估列式引擎内核。
+7. **元数据 SQLite 起步**，表结构按 Postgres 兼容设计，多用户/RBAC 阶段迁移。
 
-## 4. 关键技术决策
-
-1. **算子即纯函数**：`DataFrame → DataFrame`，参数 JSON 可序列化，禁止副作用。撤销 = 从 raw 重放去掉该步的 Recipe（Polars 惰性求值让重放廉价），不需要写 undo 反函数。
-2. **数据不可变**：原始数据永不修改；每次清洗/管道运行产出新的 DatasetVersion（Parquet，列式压缩、采样快）。血缘与审计自然成立。
-3. **执行引擎 Polars**：单机 + 分块流式，MVP 支撑 GB 级；执行接口抽象成 Engine 约束（输入输出都是版本引用），未来可换 Spark/分布式而不动上层。
-4. **规则声明式**：规则以 JSON/YAML 定义与存储，内部映射到 pandera 执行；内置规则库开箱即用，自定义规则同构。
-5. **画像自研结构化输出**：fg-data-profiling 面向 HTML 报告，不适合嵌入 UI；用 Polars 自算结构化指标（空值率/基数/分位数/直方图/top-k/类型推断），前端渲染。
-6. **元数据 SQLite 起步**：单文件零运维，表结构按 Postgres 兼容设计，多用户/RBAC 阶段再迁移。
-7. **M1 同步执行**：小文件（≤100MB）同步返回，大文件转异步任务；任务队列 M2 再引入（arq + Redis），避免过早基建。
-
-## 5. 技术栈
-
-- 后端：Python 3.12+ / FastAPI / Polars / pandera / pydantic v2 / uv 管依赖 / pytest
-- 前端：React + Vite + TypeScript / TanStack Table（虚拟滚动）/ ECharts / Tailwind；UI 遵循全局设计规范（JuanerAI Xanthil）
-- 存储：数据 Parquet + 本地文件系统（后续 S3 兼容抽象）；元数据 SQLite → Postgres
-
-## 6. M1 模块拆解
-
-M1 目标：CSV/Excel 上传 → 自动画像 → 内置规则跑分，端到端可用。
-
-### 目录结构
+## 4. 目录结构
 
 ```
 data-cleaning/
-├── server/
-│   ├── app/
-│   │   ├── main.py            # FastAPI 入口
-│   │   ├── api/               # 路由: datasets / profiling / rules
-│   │   ├── core/              # storage(版本化存储) / engine(Polars 执行)
-│   │   ├── profiling/         # 列画像计算
-│   │   └── rules/             # 内置规则库 + pandera 映射
-│   └── tests/
-├── web/
-│   └── src/                   # React 应用
-│       ├── pages/             # 上传页 / 数据集详情(画像+质量)
-│       └── components/        # 虚拟表格 / 画像图表 / 规则报告
+├── apps/studio-web/          # React 19 + Vite 工作台前端
+├── services/studio-api/      # Fastify API：数据集/会话/规则/管道 + 引擎生命周期
+├── adapters/
+│   ├── openrefine/           # OpenRefine HTTP 客户端 + 实例管理
+│   ├── quality/              # Python 子进程桥：pandera 规则 + 画像计算
+│   └── pipeline/             # (M3) Dagster 桥
+├── pybridge/                 # Python 侧：规则映射/画像/管道 job（子进程被 quality 调起）
+├── core/                     # 领域模型（Dataset/Version/Recipe/Run…），零引擎依赖
+├── bus/ + workers/           # 长任务 worker（沿用 Worker Bus 模式）
 ├── docs/
-└── data/                      # 运行时数据(gitignored)
+└── workspace/                # 运行期数据（gitignored）
 ```
 
-### 后端 API（M1 范围）
+## 5. 领域模型（沿用 v1，微调）
 
-| 端点 | 说明 |
-|---|---|
-| `POST /api/datasets` | 上传 CSV/XLSX → 解析存 Parquet raw 版本 + schema 推断 |
-| `GET /api/datasets/{id}/schema` | 列名、推断类型、基础统计 |
-| `GET /api/datasets/{id}/profile` | 每列完整画像（结构化 JSON） |
-| `GET /api/datasets/{id}/rows` | 分页采样预览（offset/limit） |
-| `POST /api/datasets/{id}/rules/validate` | 跑内置规则集，返回逐规则结果报告 |
+Dataset（逻辑数据集）/ DatasetVersion（不可变版本，血缘=版本 DAG）/ Recipe（= OpenRefine 操作历史 JSON，版本化）/ Session（工作台会话：版本+构建中 Recipe）/ RuleSet（声明式规则）/ QualityReport（pandera 结果+画像摘要，前后可对比）/ Run（管道执行实例）。Operator 不再是自研抽象——由 OpenRefine 操作类型 + GREL 承担，`core` 只存原生 JSON。
 
-### M1 内置规则集
+## 6. 里程碑（复用优先重排）
 
-非空、唯一性、类型符合、值域（数值/日期范围）、正则格式（邮箱/手机号/URL 等通用模式）。逐规则输出：违反行数、违规率、样例违规行。
-
-### 验收标准
-
-- ≤100MB CSV/XLSX 上传后数秒内返回 schema 与画像
-- 内置规则跑分生成结构化报告，前端可读
-- 全流程 API 有 pytest 覆盖（含脏数据夹具）
-
-## 7. 里程碑
-
-| 阶段 | 内容 | 形态 |
+| 阶段 | 内容 | 验收要点 |
 |---|---|---|
-| M1 | 接入 + 画像 + 内置规则跑分 | 只读诊断 |
-| M2 | 交互式算子 + 操作历史/撤销重放 | 工作台核心闭环 |
-| M3 | Recipe 序列化 + 管道执行（同引擎）+ 自定义规则 + 清洗前后质量对比 | 双形态打通 |
-| M4 | 调度、多源接入（DB/API）、血缘审计视图、LLM 清洗建议 | 生产化 |
-| 远期 | 多用户/RBAC、S3、分布式引擎、协作 | 平台化 |
+| **M0**（1–2 天） | **OpenRefine headless PoC**：无 UI 起服务，API 完成 建项目(CSV)→应用操作→导出全链路 | 最大集成风险先烧掉；API 行为记录进 adapter 契约 |
+| M1 | 产品壳 + `adapters/openrefine` + 画像 + pandera 内置规则报告 | 上传→画像→规则跑分端到端 |
+| M2 | 工作台交互清洗：自研 UI 驱动引擎转换，历史=引擎操作记录，撤销/重放 | 业务人员可完成一次完整清洗并导出 |
+| M3 | Recipe 定版→管道：Dagster 桥、调度、运行监控、清洗前后质量对比 | 工作台调好的流程能定时跑 |
+| M4 | 多源接入（SeaTunnel/DataX）、血缘审计视图、dedupe 实体匹配、LLM 清洗建议 | 生产化 |
 
-## 8. 风险与对策
+## 7. 风险与对策
 
-- **双形态范围大** → 共享算子内核，先工作台后管道，M3 才打通提升流。
-- **大文件交互性能** → 服务端分页采样 + 前端虚拟滚动；工作台永远操作采样视图，落盘才是全量。
-- **Excel 边界情况**（合并单元格/多 sheet）→ 用 calamine 引擎解析，M1 明确声明支持范围（单 sheet、首行为表头）。
-- **通用定位下缺差异点** → 差异化押注在"工作台↔管道一体化"体验与 LLM 辅助清洗（M4），中文数据算子作为 roadmap 增强而非立项依据。
+- **OpenRefine Web API 非稳定公开契约**（本质是其自用接口）→ adapter 锁版本 + 契约测试覆盖全用例；升级引擎必须过契约。
+- **OpenRefine 无多租户/并发隔离** → 每工作区独立实例 + 闲置回收；多租户阶段再评估实例池。
+- **内存型引擎撑不住大数据** → 采样交互 + worker 全量批处理；超限场景以 v1 Polars 内核为可替换备选（adapter 边界已保证可换）。
+- **JVM/Python 双运行时运维成本** → 统一由 studio-api 管理子进程生命周期 + 健康检查；一键启动脚本（参照 model-mlflow `启动模型工作台.command`）。
+- **soda-core 类许可证陷阱** → 引入任何新开源件前先核许可证（ELv2/AGPL 一票否决），该检查固化进选型流程。
+
+## 8. 与 v1 方案的关系
+
+v1（全自研 FastAPI + Polars + pandera，见 git 历史 `f048706..ac2954b` 版 design.md）的领域模型、不可变版本、声明式规则思想全部保留；其执行内核降级为引擎层备选。当前基线以本文档为准。

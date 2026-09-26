@@ -52,7 +52,7 @@
 | [fivetran/great_expectations](https://github.com/fivetran/great_expectations) | 11.8k | 活跃（已并入 Fivetran） | 最主流数据质量框架，断言式 Expectation |
 | [unionai-oss/pandera](https://github.com/unionai-oss/pandera) | 4.5k | 活跃 | 轻量 DataFrame schema 校验，适合嵌入清洗管道 |
 | [awslabs/deequ](https://github.com/awslabs/deequ) | 3.6k | 活跃 | Spark 上的数据质量单元测试 |
-| [sodadata/soda-core](https://github.com/sodadata/soda-core) | 2.4k | 活跃 | YAML 声明式质量检查，接多种仓库 |
+| [sodadata/soda-core](https://github.com/sodadata/soda-core) | 2.4k | 活跃 | YAML 声明式质量检查；**LICENSE 实为 Elastic License 2.0（2026-09-26 核实），禁止作为托管服务提供，自研产品需法务确认，已从选型剔除** |
 | [elementary-data/elementary](https://github.com/elementary-data/elementary) | 2.4k | 活跃 | dbt 原生数据可观测 |
 
 ### Profiling 数据画像
