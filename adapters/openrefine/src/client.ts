@@ -98,11 +98,11 @@ export class OpenRefineClient {
   }
 
   /** 按序应用操作（OpenRefine 操作 JSON 数组）。返回逐条 historyEntry。 */
-  async applyOperations(projectId: number, operations: unknown[]): Promise<unknown[]> {
+  async applyOperations(projectId: number, operations: unknown[]): Promise<HistoryEntry[]> {
     const data = (await this.postForm(
       `/command/core/apply-operations?project=${projectId}`,
       { operations: JSON.stringify(operations) },
-    )) as { code?: string; historyEntries?: unknown[] };
+    )) as { code?: string; historyEntries?: HistoryEntry[] };
     if (data.code !== "ok") {
       throw new Error(`apply-operations failed: ${JSON.stringify(data).slice(0, 300)}`);
     }
@@ -118,14 +118,41 @@ export class OpenRefineClient {
     return { past: data.past ?? [], future: data.future ?? [] };
   }
 
+  /** 提取操作历史（Recipe JSON）。实测形态：{entries:[{description, operation}]}，
+   * 取内层 operation 即为可原样传给 applyOperations 的数组（引擎回填的
+   * fromBlank/fromError/description 字段在回放时无害，往返同构）。 */
+  async getOperations(projectId: number): Promise<unknown[]> {
+    const data = (await this.getJson(
+      `/command/core/get-operations?project=${projectId}`,
+    )) as { entries?: Array<{ operation?: unknown }> };
+    return (data.entries ?? [])
+      .map((e) => e.operation)
+      .filter((op): op is NonNullable<typeof op> => op !== undefined);
+  }
+
   /**
-   * 撤销最后一步：undo-redo 的语义是"回滚到 lastDoneID 这条为止"，
-   * 故传入倒数第二条的 id；返回 {"code":"pending"}（异步），随后轮询历史收敛。
+   * 撤销/重做到任意历史点：undo-redo 的语义是"状态推进到 lastDoneID 这条为止"——
+   * 传 past 中某条 id = 回滚到该条（其后入 future）；传 future 中某条 id = 前滚到该条；
+   * 传 0 = 全部撤销。返回 {"code":"pending"}（异步），轮询历史收敛到预期长度。
    */
-  async undoLast(projectId: number): Promise<void> {
-    const { past } = await this.getHistory(projectId);
-    if (past.length === 0) throw new Error("nothing to undo");
-    const lastDoneID = past.length >= 2 ? past[past.length - 2]!.id : 0;
+  async undoRedo(projectId: number, lastDoneID: number): Promise<void> {
+    const { past, future } = await this.getHistory(projectId);
+    let expected: number;
+    if (lastDoneID === 0) {
+      expected = 0;
+    } else {
+      const pastIdx = past.findIndex((e) => e.id === lastDoneID);
+      if (pastIdx >= 0) {
+        expected = pastIdx + 1;
+      } else {
+        const futureIdx = future.findIndex((e) => e.id === lastDoneID);
+        if (futureIdx < 0) {
+          throw new Error(`lastDoneID ${lastDoneID} not found in history of project ${projectId}`);
+        }
+        expected = past.length + futureIdx + 1;
+      }
+    }
+
     const token = await this.getCsrfToken();
     const res = await fetch(
       `${this.base}/command/core/undo-redo?project=${projectId}` +
@@ -133,14 +160,21 @@ export class OpenRefineClient {
       { method: "POST" },
     );
     if (!res.ok) throw new Error(`undo-redo failed: HTTP ${res.status}`);
-    const expected = past.length - 1;
+
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 200));
       const current = await this.getHistory(projectId);
-      if (current.past.length <= expected) return;
+      if (current.past.length === expected) return;
     }
-    throw new Error("undo did not settle within 30s");
+    throw new Error(`undo-redo did not settle to past.length=${expected} within 30s`);
+  }
+
+  /** 撤销最后一步（undoRedo 的糖衣）。 */
+  async undoLast(projectId: number): Promise<void> {
+    const { past } = await this.getHistory(projectId);
+    if (past.length === 0) throw new Error("nothing to undo");
+    return this.undoRedo(projectId, past[past.length - 2]?.id ?? 0);
   }
 
   /** 导出为 CSV。实测：仅支持 POST（GET 返回 500），表单需 format 与 engine。 */

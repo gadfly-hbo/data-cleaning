@@ -45,7 +45,7 @@ test("csrf token as multipart form field is rejected by engine", async () => {
 });
 
 test("createProject throws on 302 location without project param", async () => {
-  const fakeFetch = vi.fn(async (input: RequestInfo | URL) => {
+  const fakeFetch = vi.fn(async (input: unknown) => {
     const url = String(input);
     if (url.includes("get-csrf-token")) {
       return new Response(JSON.stringify({ token: "stub-token" }), {

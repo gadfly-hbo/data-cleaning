@@ -90,25 +90,33 @@ export async function buildApp(opts: AppOptions = {}) {
     const client = await engineManager.ensureEngine();
     const name = path.basename(safeName, ext);
     const projectId = await client.createProject(rawPath, name);
-    const columns = await client.getColumns(projectId);
-    const rowCount = await client.getRowCount(projectId);
+    try {
+      const columns = await client.getColumns(projectId);
+      const rowCount = await client.getRowCount(projectId);
 
-    // 画像/跑分先于入库计算：桥失败时抛错、不产生半注册数据集（REVIEW 轮 1 修复）
-    const profile = await runPybridge({ task: "profile", file: rawPath });
-    const quality = await runPybridge({ task: "rules", file: rawPath });
+      // 画像/跑分先于入库计算：桥失败时抛错、不产生半注册数据集（REVIEW 轮 1 修复）
+      const profile = await runPybridge({ task: "profile", file: rawPath });
+      const quality = await runPybridge({ task: "rules", file: rawPath });
 
-    const rec = insertDataset(db, {
-      name,
-      file_hash: hash,
-      file_path: rawPath,
-      project_id: projectId,
-      row_count: rowCount,
-      columns,
-      profile,
-      quality,
-    });
+      const rec = insertDataset(db, {
+        name,
+        file_hash: hash,
+        file_path: rawPath,
+        project_id: projectId,
+        row_count: rowCount,
+        columns,
+        profile,
+        quality,
+      });
 
-    return reply.code(200).send(toApi(getDataset(db, rec.id)!));
+      return reply.code(200).send(toApi(getDataset(db, rec.id)!));
+    } catch (err) {
+      // 孤儿项目补偿（M2/C1）：入库前任何失败都回收引擎项目，避免 engine-data 累积
+      await client.deleteProject(projectId).catch((e) => {
+        req.log.warn(`orphan project ${projectId} reclaim failed: ${String(e)}`);
+      });
+      throw err;
+    }
   });
 
   app.get("/api/datasets", async () => ({
@@ -155,6 +163,73 @@ export async function buildApp(opts: AppOptions = {}) {
     const report = await runPybridge({ task: "rules", file: rec.file_path });
     updateReport(db, rec.id, "quality", report);
     return report;
+  });
+
+  // ===== 清洗工作台端点（M2/C1，全部经 adapter 直达引擎）=====
+
+  app.post("/api/datasets/:id/operations", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = getDataset(db, Number(id));
+    if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
+    const body = req.body as { operations?: unknown[] } | null | undefined;
+    if (!body || typeof body !== "object" || !Array.isArray(body.operations) || body.operations.length === 0) {
+      return reply.code(400).send({ error: "body must be JSON like {\"operations\": [...]}" });
+    }
+    const client = await engineManager.ensureEngine();
+    const entries = await client.applyOperations(rec.project_id, body.operations);
+    return { entries, history: await client.getHistory(rec.project_id) };
+  });
+
+  app.get("/api/datasets/:id/history", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = getDataset(db, Number(id));
+    if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
+    const client = await engineManager.ensureEngine();
+    return client.getHistory(rec.project_id);
+  });
+
+  app.post("/api/datasets/:id/history/restore", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = getDataset(db, Number(id));
+    if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
+    const body = req.body as { lastDoneID?: number } | null | undefined;
+    if (!body || typeof body !== "object" || !Number.isInteger(body.lastDoneID) || (body.lastDoneID ?? 0) < 0) {
+      return reply.code(400).send({ error: "body must be JSON like {\"lastDoneID\": <id>}" });
+    }
+    const client = await engineManager.ensureEngine();
+    await client.undoRedo(rec.project_id, body.lastDoneID!);
+    return client.getHistory(rec.project_id);
+  });
+
+  app.get("/api/datasets/:id/export", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = getDataset(db, Number(id));
+    if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
+    const client = await engineManager.ensureEngine();
+    const csv = await client.exportRowsCsv(rec.project_id);
+    // HTTP 头不接受非 ASCII（中文名会 ERR_INVALID_CHAR）：RFC 5987 filename* + ASCII fallback
+    return reply
+      .header("content-type", "text/csv; charset=utf-8")
+      .header(
+        "content-disposition",
+        `attachment; filename="dataset-${rec.id}.csv"; filename*=UTF-8''${encodeURIComponent(rec.name)}.csv`,
+      )
+      .send(csv);
+  });
+
+  app.get("/api/datasets/:id/recipe", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = getDataset(db, Number(id));
+    if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
+    const client = await engineManager.ensureEngine();
+    const operations = await client.getOperations(rec.project_id);
+    return reply
+      .header("content-type", "application/json; charset=utf-8")
+      .header(
+        "content-disposition",
+        `attachment; filename="dataset-${rec.id}.recipe.json"; filename*=UTF-8''${encodeURIComponent(rec.name)}.recipe.json`,
+      )
+      .send(operations);
   });
 
   app.addHook("onClose", async () => {

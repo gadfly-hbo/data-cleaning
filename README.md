@@ -2,7 +2,7 @@
 
 数据清洗平台：交互式工作台 + 清洗管道双形态（目标形态见 [docs/design.md](docs/design.md)）。产品模式对齐 model-mlflow——自研 TS 产品壳，开源引擎经 adapter 隔离接入（OpenRefine BSD-3 / pandera MIT / Polars MIT）。
 
-**当前状态：M1 已交付**——本地 Web 应用的只读诊断形态：上传 CSV/XLSX → 自动列画像 + 内置规则集质量报告。交互式清洗（M2）、管道（M3）见里程碑。
+**当前状态：M2 已交付**——交互式清洗工作台：上传 CSV/XLSX → 自动画像 + 质量报告 → 在「清洗」tab 做值替换 / 文本变换（内置 + GREL）→ 操作历史任意点回滚/重做 → 导出清洗后 CSV 或下载 Recipe（操作历史 JSON，M3 管道输入）。管道与调度见 M3（[docs/design.md](docs/design.md)）。
 
 ## 架构
 

@@ -60,7 +60,7 @@ export function AppShell() {
       <footer className="bg-surface border-t border-border px-4 h-8 flex items-center gap-4 text-[10.5px] text-text-3">
         <span>服务：本地 studio-api</span>
         <span className="mono">{activeId ? `dataset #${activeId}` : "未选择数据集"}</span>
-        <span>M1 诊断视图（只读）</span>
+        <span>M2 清洗工作台</span>
         <span className="ml-auto">数据不出本机 · OpenRefine 引擎本地托管</span>
       </footer>
     </div>

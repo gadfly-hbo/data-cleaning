@@ -2,22 +2,23 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
+import { CleaningTab } from "./CleaningTab.js";
+import { PreviewTable } from "./PreviewTable.js";
 import {
   getDataset,
-  getRows,
   revalidateRules,
   type DatasetSummary,
   type ProfileColumn,
   type QualityRule,
-  type RowsPage,
 } from "../api.js";
 
-type Tab = "preview" | "profile" | "quality";
+type Tab = "preview" | "profile" | "quality" | "cleaning";
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "preview", label: "预览" },
   { key: "profile", label: "画像" },
   { key: "quality", label: "质量" },
+  { key: "cleaning", label: "清洗" },
 ];
 
 const KIND_LABELS: Record<string, string> = {
@@ -57,7 +58,7 @@ export function DatasetPage() {
         <span className="mono">
           {dataset.rows} 行 · {dataset.columns.length} 列
         </span>{" "}
-        · 上传于 {new Date(dataset.createdAt).toLocaleString("zh-CN")} · 以下为只读诊断，清洗工作台在 M2 提供。
+        · 上传于 {new Date(dataset.createdAt).toLocaleString("zh-CN")} · 画像与质量为上传时快照，「清洗」tab 可修改数据并随时回滚。
       </p>
 
       <div className="flex gap-1.5 mb-3.5">
@@ -76,8 +77,9 @@ export function DatasetPage() {
         ))}
       </div>
 
-      {tab === "preview" && <PreviewTab datasetId={datasetId} columns={dataset.columns} />}
+      {tab === "preview" && <PreviewTable datasetId={datasetId} columns={dataset.columns} />}
       {tab === "profile" && <ProfileTab dataset={dataset} />}
+      {tab === "cleaning" && <CleaningTab dataset={dataset} />}
       {tab === "quality" && (
         <QualityTab
           datasetId={datasetId}
@@ -91,71 +93,6 @@ export function DatasetPage() {
         />
       )}
     </section>
-  );
-}
-
-function PreviewTab({ datasetId, columns }: { datasetId: number; columns: string[] }) {
-  const [page, setPage] = useState<RowsPage | null>(null);
-  const [offset, setOffset] = useState(0);
-  const limit = 50;
-
-  useEffect(() => {
-    setPage(null);
-    getRows(datasetId, offset, limit)
-      .then(setPage)
-      .catch(() => setPage(null));
-  }, [datasetId, offset]);
-
-  if (!page) return <div className="text-text-3">加载中…</div>;
-
-  return (
-    <div>
-      <div className="card overflow-x-auto">
-        <table className="tbl">
-          <thead>
-            <tr>
-              <th className="w-12 text-text-3 mono">#</th>
-              {columns.map((c) => (
-                <th key={c}>{c}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {page.rows.map((row, i) => (
-              <tr key={offset + i}>
-                <td className="text-text-3 mono">{offset + i + 1}</td>
-                {row.map((v, j) => (
-                  <td key={j} title={v === null ? "（空）" : String(v)}>
-                    {v === null ? <span className="text-text-3">空</span> : String(v)}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="flex items-center gap-2 mt-2.5 text-[11.5px] text-text-2">
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={offset === 0}
-          onClick={() => setOffset(Math.max(0, offset - limit))}
-        >
-          上一页
-        </button>
-        <span className="mono">
-          {offset + 1}–{Math.min(offset + limit, page.total)} / 共 {page.total} 行
-        </span>
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={offset + limit >= page.total}
-          onClick={() => setOffset(offset + limit)}
-        >
-          下一页
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -249,7 +186,7 @@ function QualityTab({
       <div className="flex items-center gap-3 flex-wrap">
         <span className="chip chip-ok">{passed} 项通过</span>
         <span className="chip chip-warn">{total - passed} 项有违规</span>
-        <span className="text-text-3 text-[11.5px] mono">共 {total} 条规则</span>
+        <span className="text-text-2 text-[11.5px] mono">共 {total} 条规则</span>
         <button type="button" className="btn-secondary ml-auto" onClick={() => void rerun()} disabled={running}>
           {running ? "重跑中…" : "重跑规则"}
         </button>
@@ -276,6 +213,8 @@ function RuleCard({ rule }: { rule: QualityRule }) {
         <span className="font-semibold">{label}</span>
         {rule.violations === 0 ? (
           <span className="chip chip-ok">通过</span>
+        ) : rule.violation_ratio >= 0.5 ? (
+          <span className="chip chip-fail">{rule.violations} 处违规 · {pct(rule.violation_ratio)}</span>
         ) : (
           <span className="chip chip-warn">{rule.violations} 处违规 · {pct(rule.violation_ratio)}</span>
         )}
@@ -284,14 +223,14 @@ function RuleCard({ rule }: { rule: QualityRule }) {
         <div className="mt-2 flex flex-col gap-1">
           {rule.samples.map((s) => (
             <div key={s.row_index} className="mono text-[11.5px] text-text-2">
-              第 {s.row_index + 1} 行：
+              <span className="text-text-2">第 {s.row_index + 1} 行：</span>
               <span className="bg-surface-2 border border-border rounded-sm px-1.5 py-0.5 ml-1">
                 {s.value === null ? "（空）" : String(s.value)}
               </span>
             </div>
           ))}
           {rule.violations > rule.samples.length && (
-            <div className="text-[10.5px] text-text-3">仅示样前 {rule.samples.length} 条，共 {rule.violations} 处</div>
+            <div className="text-[10.5px] text-text-2 mono">仅示样前 {rule.samples.length} 条，共 {rule.violations} 处</div>
           )}
         </div>
       )}

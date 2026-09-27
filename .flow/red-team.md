@@ -1,45 +1,45 @@
-# Red-Team: M1 — 产品壳（Fastify+React）+ adapters/openrefine + pandera 规则桥
+# Red-Team: M2 — 交互式清洗工作台（自研 UI 驱动操作、历史=操作记录、撤销/重放）
 
-> 评审对象：`.flow/proposal.md`。日期：2026-09-27。结论：**go**，但把「pybridge Python 环境兼容性」提为首切片风险燃烧项。
+> 评审对象：`.flow/proposal.md`。日期：2026-09-27。结论：**go**，把「undo-redo 任意点语义」与「getOperations 回放闭环」设为切片 0 契约实测。
 
 ## Top Kill-Assumptions（按 影响×看错概率×测试成本 排序）
 
-### 1. pandera + Polars 在本机 Python 3.14.4 上可用
-- **Claim**: pybridge 能在现有 Python 环境装齐 pandera/Polars 并稳定执行（一次性子进程形态）。
-- **Steelman**: 本机有 uv（可任意装 3.12/3.13 解释器）；pandera 与 Polars 都是一线活跃库，wheel 覆盖主流版本。
-- **Fails if**: Python 3.14 太新导致 pandera（其 pandas 依赖链）或 Polars 无对应 wheel / 运行期坑，被迫锁旧解释器。
-- **Evidence to get this week**: 首切片 spike：`uv venv` + 装 pandera+polars + 脏 CSV 一次规则跑分，一次画像计算。
-- **Kill criterion**: 3.12/3.13 下也不可用（几乎不可能，届时换库：规则层可退 pandera→纯 Polars 实现，画像本就 Polars）。
-- **Cheapest test**: 15 分钟 spike。
-- **评注**: 即便 3.14 不可用，uv 装 3.12 的回退路径干净——这是"可测且低风险"的假设，但必须第一个测。
+### 1. undo-redo 支持回滚/重做到任意历史点且状态一致
+- **Claim**: lastDoneID 传任意历史条目 id 可回滚到该点；对 future 条目重做可恢复（M0 仅实测了撤销一步）。
+- **Steelman**: 端点语义在 M0 契约文档已记录（"回滚到该条为止"），官方 UI 的 undo/redo 树就靠它；轮询收敛先例已验证。
+- **Fails if**: 重做（把 lastDoneID 指回较晚条目）行为不是"前滚"而有副作用/被拒。
+- **Evidence to get this week**: 切片 0 契约实测：3 操作项目上回滚到第 1 条 → 重做到第 3 条 → 数据与历史逐项断言。
+- **Kill criterion**: 重做不支持任意点或产生不一致 → 工作台历史交互退化为线性撤销/重做（步进式），UI 仍可交付但记录降级。
+- **Cheapest test**: 20 分钟 adapter 契约测试。
 
-### 2. 一轮 dev-flow 能交付 M1 全量（产品壳+前端+adapter+桥）
-- **Claim**: 四组件在一个 flow 预算内（默认 60 turns / 12h 墙钟）完成并过双轴审查。
-- **Steelman**: M0 六切片一轮完成且余量充足；M1 有 M0 契约与 model-mlflow 工程范式直接参照，前端是标准 CRUD 级页面。
-- **Fails if**: 前端视觉细节（DESIGN.md 三栏外壳等）吃掉过量轮次，或审查返工超 3 轮熔断。
-- **Evidence to get this week**: 拆解时把切片按"纵向可交付"排序，预算熔断时保已绿切片为交付边界。
-- **Kill criterion**: 熔断时已绿切片构成最小可用产品壳（上传+画像可见），剩余明确移交下轮。
-- **Cheapest test**: 拆解本身（ISSUES 阶段执行）。
+### 2. getOperations 提取的操作 JSON 与 apply-operations 输入同构（提取→回放闭环）
+- **Claim**: 从项目提取的操作历史可原样应用到另一项目（Recipe 可移植，M3 管道的基石）。
+- **Steelman**: OpenRefine 自家的"提取/应用操作"UI 功能即此流程；M0 已实证 apply 方向。
+- **Fails if**: 提取的 JSON 含项目特有字段（列 id 而非列名等）导致跨项目应用失败。
+- **Evidence to get this week**: 切片 0 顺带实测：提取 A 项目操作 → 应用到同构 B 项目 → 比对数据。
+- **Kill criterion**: 不同构 → M2 不做 Recipe 导出（开放问题直接裁掉），M3 管道改走"记录用户操作原始 JSON"路线。
+- **Cheapest test**: 同一批 curl。
 
-### 3. 一次性子进程桥的性能可接受（画像/跑分延迟）
-- **Claim**: 每次画像/规则跑分 spawn 一次 Python（冷启动 + 读文件 + 计算）在 ≤100MB 文件下体验可接受。
-- **Steelman**: M0 实测 OpenRefine JVM 冷启动 ~6s 已可接受；Python 冷启动 <1s；Polars 100MB 统计 <1s 级。
-- **Fails if**: 100MB 文件跑分冷启动链路超 ~10s 量级且用户感知差（M1 无交互频率，风险低）。
-- **Kill criterion**: 实测 >10s 则 M2 引入常驻桥（架构已在 adapter 边界内，不破契约）。
-- **Cheapest test**: 首切片 spike 顺带计时。
+### 3. 引擎操作历史作为唯一状态源时 UI 的一致性（操作/回滚竞态）
+- **Claim**: 前端每次操作后以 getHistory+getRows 收敛展示，无需前端自建状态机。
+- **Steelman**: undo-redo 是 pending 异步但毫秒级完成（M0 实测）；apply-operations 是同步 ok；M1 预览已实时。
+- **Fails if**: 连续快速操作时历史/数据读到中间态，UI 闪烁错序。
+- **Evidence to get this week**: 前端切片用「操作后串行等待收敛再解锁按钮」模式；组件测试锁定。
+- **Kill criterion**: 引擎在正常操作频率下出现不可收敛态（几乎不可能）。
+- **Cheapest test**: 实现 + 组件测试。
 
 ## What's Well-Reasoned
 
-- 组件分解与 model-mlflow 已验证范式一一对应（壳/adapter/子进程桥），无架构发明。
-- M0 契约文档 + 可演化用例集把 adapters/openrefine 从高风险变成搬运工。
-- 只读诊断的 M1 边界清晰，不碰 M2 的交互复杂度。
-- 许可证/lock/workspace 纪律已内化进提案。
+- 算子子集克制（两算子+GREL），避免把 M2 做成 OpenRefine 全功能复刻——差异化在产品壳体验而非功能覆盖。
+- 复用 M0/M1 全部契约资产，adapter 扩展是增量不是新发明。
+- 数据版本化推迟到 M3 与管道一起做，避免 M2 引入不必要的版本表复杂度。
+- M1 移交项处置有区分（correctness 债纳入、打磨顺手、e2e 留 PRD 决）。
 
 ## What I Couldn't Assess
 
-- 部署形态预期（单机自用 or 后续要打包分发）——影响 pybridge 打包方式，M1 按 uv 本机环境处理。
-- 用户对 UI 完成度的验收标准（可用 vs 精致）——DESIGN.md 是唯一基线，切片按"可用+合规"交付。
+- GREL 自定义输入的用户接受度（业务人员是否会写表达式——内置算子兜底，风险可控）。
+- 引擎长会话下的 workspace 增长（多次操作/回滚的磁盘累积）——M2 单用户量级小，M3 观察。
 
 ## 净结论
 
-go。把 kill-假设 1（Python 兼容 spike）设为切片 0/1；拆解必须保"熔断可交付"属性。
+go。切片 0 = 契约实测（kill-假设 1+2 一次烧掉）；前端切片以"操作后串行收敛"为设计约束。

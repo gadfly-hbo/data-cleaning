@@ -86,3 +86,69 @@ export async function revalidateRules(id: number): Promise<QualityReport> {
     await fetch(`/api/datasets/${id}/rules/validate`, { method: "POST" }),
   );
 }
+
+// ===== 清洗工作台（M2）=====
+
+export interface HistoryEntry {
+  id: number;
+  description: string;
+  time: string;
+}
+
+export interface History {
+  past: HistoryEntry[];
+  future: HistoryEntry[];
+}
+
+export async function applyOperations(
+  id: number,
+  operations: unknown[],
+): Promise<{ entries: HistoryEntry[]; history: History }> {
+  return json<{ entries: HistoryEntry[]; history: History }>(
+    await fetch(`/api/datasets/${id}/operations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ operations }),
+    }),
+  );
+}
+
+export async function getHistory(id: number): Promise<History> {
+  return json<History>(await fetch(`/api/datasets/${id}/history`));
+}
+
+export async function restoreHistory(id: number, lastDoneID: number): Promise<History> {
+  return json<History>(
+    await fetch(`/api/datasets/${id}/history/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ lastDoneID }),
+    }),
+  );
+}
+
+/** 触发浏览器下载（导出 CSV / Recipe JSON）。 */
+async function download(id: number, suffix: string, fallbackName: string): Promise<void> {
+  const res = await fetch(`/api/datasets/${id}/${suffix}`);
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") ?? "";
+  // RFC 5987：filename* 优先（保留中文名），回退 ASCII filename
+  const starMatch = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  const match = starMatch ?? /filename="?([^";]+)"?/.exec(disposition);
+  const rawName = starMatch ? decodeURIComponent(starMatch[1]!) : match?.[1];
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = rawName ?? fallbackName;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function exportCsv(id: number, name: string): Promise<void> {
+  return download(id, "export", `${name}.csv`);
+}
+
+export function downloadRecipe(id: number, name: string): Promise<void> {
+  return download(id, "recipe", `${name}.recipe.json`);
+}

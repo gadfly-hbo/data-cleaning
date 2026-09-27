@@ -1,91 +1,91 @@
-# PRD — M1：产品壳 + adapters/openrefine + pandera 规则桥
+# PRD — M2：交互式清洗工作台
 
 > 规格事实源：`.flow/proposal.md`（最高优先）。发布方式：无 issue tracker，写入 `.flow/prd.md`。
-> 红队：`.flow/red-team.md`（verdict go；pybridge 兼容性 spike 设为切片 0/1；拆解保"熔断可交付"）。
+> 红队：`.flow/red-team.md`（verdict go；切片 0 = 两条契约假设实测；前端以"操作后串行收敛"为设计约束）。
 
 ## Problem Statement
 
-M0 证明了引擎与规则库可被 headless 驱动（契约文档 + PoC），但它们只是一堆 API 和脚本——业务人员无法使用。M1 要把它们装进一个能用的产品壳：在浏览器里上传脏数据文件，立刻看到每列画像和质量问题的结构化报告。这是平台从"证据"到"产品"的第一步。
+M1 交付了只读诊断（画像/质量报告），但用户发现数据脏之后只能下载走人——清洗仍要回 Excel/OpenRefine 原版 UI。M2 要把"改数据"搬进自研产品壳：业务人员在浏览器里对选中列做替换/变换、随时回滚、完成后导出，全程不离开平台，且每一步都记录为可重放的操作历史（M3 管道的直接输入）。
 
 ## Solution
 
-一个本地 Web 应用：Fastify 服务端托管引擎与规则桥，React 前端提供上传与数据集浏览。上传 CSV/XLSX 后自动完成三件事——数据集注册（含 OpenRefine 项目）、列画像计算、内置规则集跑分——并在详情页呈现预览/画像/质量三个视图。
+详情页新增「清洗」工作台 tab：操作面板（列选择 + 值替换/文本变换/GREL）+ 实时预览 + 操作历史面板（点击任意点回滚/重做）+ 导出按钮。操作经 studio-api 直达 OpenRefine 引擎，历史即引擎操作记录（Recipe），预览天然实时。
 
 ## User Stories
 
 业务分析人员（最终用户）：
 
-1. 作为业务分析人员，我要上传 ≤100MB 的 CSV/XLSX 文件，以便把手头脏数据交给平台诊断。
-2. 作为业务分析人员，我要看到已上传数据集的列表（名称/行数/列数/上传时间），以便管理我的数据集。
-3. 作为业务分析人员，我要在详情页看到数据预览行，以便确认上传的内容正确。
-4. 作为业务分析人员，我要看到每一列的画像（类型推断、空值率、基数、min/max、分位数、top-k），以便快速了解数据长什么样、哪里可疑。
-5. 作为业务分析人员，我要看到内置规则集的跑分结果（逐规则：违反行数、违规率、样例违规行），以便知道数据脏在哪、有多脏。
-6. 作为业务分析人员，上传不合法的文件（超限/坏格式）时我要得到明确错误，而不是无声失败。
+1. 作为业务分析人员，我要在数据集详情页进入清洗工作台并看到当前数据预览，以便在真实数据上决定清洗动作。
+2. 作为业务分析人员，我要对选中列做值替换（从该列高频值中多选旧值、输入一个新值），以便批量纠正同类脏值（如"广州市"→"广州"）。
+3. 作为业务分析人员，我要对选中列应用内置文本变换（去首尾空白/转大写/转小写），以便一键完成最常见的标准化。
+4. 作为业务分析人员，我要输入自定义 GREL 表达式做文本变换，以便表达内置项覆盖不了的规则。
+5. 作为业务分析人员，每次操作应用后预览要立即反映结果，以便确认操作效果再继续。
+6. 作为业务分析人员，我要看到操作历史（逐条描述、最新在前），以便知道我已经做了什么。
+7. 作为业务分析人员，我要点击历史中任意一条回滚到该点，以便撤销其后的一串操作。
+8. 作为业务分析人员，回滚后我要能重做（逐步或到某条），以便恢复误回滚。
+9. 作为业务分析人员，清洗完成后我要一键导出清洗后数据为 CSV，以便交付下游。
+10. 作为业务分析人员，坏操作（如非法 GREL）要得到明确错误且数据不被破坏，以便放心尝试。
 
 平台开发者（我方）：
 
-7. 作为平台开发者，`adapters/openrefine` 的契约测试要成为 PoC 用例集的演化版并常驻回归（含 CSRF 查询参数、302 取 id 等怪癖负例），以便引擎升级风险被测试锁住。
-8. 作为平台开发者，OpenRefine 引擎生命周期由 studio-api 托管（按需启动、闲置回收、退出清理），以便用户无需手动管理 Java 进程。
-9. 作为平台开发者，pybridge 以一次性子进程调用完成画像/规则计算（JSON 进出），以便 bridge 故障不影响 API 存活。
-10. 作为平台开发者，全部 API 独立于前端可用（curl 可走完上传→画像→跑分），以便后续管道形态复用同一 API。
+11. 作为平台开发者，adapter 的 undo-redo 任意点语义与 getOperations 提取→回放闭环要有常驻契约测试，以便 M3 管道建立在实证契约上。
+12. 作为平台开发者，上传链路失败时要回收孤儿引擎项目（M1 移交债），以便引擎工作区不随失败累积。
+13. 作为平台开发者，全部清洗端点独立于前端可用（curl 走完 应用→历史→回滚→导出），以便 M3 管道复用同一 API。
+14. 作为平台开发者，Recipe（操作历史 JSON）可下载导出，以便手工备份与 M3 管道直接消费。
 
 ## Implementation Decisions
 
-- **monorepo**：npm workspaces，顶层 `apps/`（studio-web）、`services/`（studio-api）、`adapters/`（openrefine）、`pybridge/`；根 `tsconfig.base.json`，工程范式对齐 model-mlflow。
-- **Python 侧**：uv 管理（pyproject + uv.lock 锁依赖）；解释器版本由切片 0 spike 决定（本机 3.14 优先，wheel 不可用回退 uv 安装 3.12/3.13）。
-- **pybridge 协议**：一次性子进程 CLI，stdin 收 JSON 任务（文件路径 + 任务类型 + 规则配置），stdout 回 JSON 结果，非零退出码即失败；studio-api 经 TS 侧 adapter 封装调用。
-- **数据流**：上传文件按内容寻址存 workspace（不可变 raw）→ 同步建 OpenRefine 项目（数据集注册，为 M2 工作台铺路）→ 元数据（id/名称/行列数/schema/project id/时间）入 SQLite；画像与规则跑分由 pybridge 直接读 raw 文件（M1 无清洗，raw 即真相）。
-- **元数据库**：SQLite（design.md 既定决策落到 M1），表结构按 Postgres 兼容。
-- **后端**：Fastify v5，REST JSON；上传 multipart；数据集/画像/报告端点。
-- **前端**：React 19 + Vite；Tailwind，token 直接映射全局 DESIGN.md（JuanerAI Xanthil）；页面两枚——上传页（含数据集列表）与数据集详情页（预览/画像/质量三视图），布局遵循规范的工作台范式。
-- **XLSX 解析**：在 pybridge 侧（Polars read_excel），TS 侧不引入解析依赖；范围限单 sheet、首行表头。
-- **引擎生命周期**：studio-api 进程内托管（首请求惰性启动，进程退出钩子回收）；M1 单实例。
+- **UI 形态**：详情页第四 tab「清洗」（预览/画像/质量/清洗）——数据集上下文连续，复用 M1 页面结构；不建独立路由。
+- **操作面板**：列下拉选择（数据集列清单）；值替换=从画像 top 值多选旧值+新值输入；文本变换=内置三选一或 GREL 自由输入（预填 `value.trim()` 示例）；应用按钮在请求期间禁用（串行收敛约束）。
+- **历史面板**：past 倒序（最新在上）逐条 description；点击条目=回滚到该条（该条保留生效）；future 与 past 统一按时间线倒序混排（最新在上；审查裁决留痕），点击 future 条目=前滚到该条；另设「撤销一步」「重做一步」快捷按钮。
+- **API 端点**（studio-api，全部经 adapter）：
+  - `POST /api/datasets/:id/operations` body `{operations:[...]}` → 应用并返回最新历史
+  - `GET /api/datasets/:id/history` → `{past:[{id,description,time}],future:[...]}`
+  - `POST /api/datasets/:id/history/restore` body `{lastDoneID}` → 回滚/重做到该点（轮询收敛后返回最新历史）
+  - `GET /api/datasets/:id/export` → CSV 流下载（attachment 文件名 `<数据集名>.csv`）
+  - `GET /api/datasets/:id/recipe` → 操作历史 JSON 下载（getOperations 提取）
+- **adapter 扩展**：`undoRedo(projectId, lastDoneID)`（泛化，`undoLast` 改为其糖衣）、`getOperations(projectId)`（提取 Recipe）；契约测试：3 操作项目上的回滚/重做矩阵、提取→应用到同构新项目→数据一致。
+- **孤儿项目补偿**：上传链路在 insertDataset 前的任何失败（pybridge/引擎）→ `deleteProject` 回收（尽力而为，失败仅记日志）。
+- **UI 打磨**（M1 移交 3 条顺手做）：格式类违规胶囊统一用 warn 语义配色；mono 数字 tabular-nums 间距；次级文字对比度微调。
+- **文本变换列约束**：仅字符串列（引擎会拒绝非字符串列的 str 类 GREL，前端先按画像 dtype 过滤列下拉）。
 
 ## Testing Decisions
 
-- 只测外部行为（HTTP API / 子进程协议 / 渲染输出），不测实现细节；测试 seam：studio-api 的 HTTP 接口、pybridge 的 CLI 协议、adapters/openrefine 的 client 公共接口（与 M0 一致）。
-- `adapters/openrefine`：契约测试 = PoC 4 用例迁移演进 + 补怪癖负例（CSRF 表单字段无效须报错、缺 project 参数 302 解析报错）——M0 审查遗留项落地。
-- pybridge：pytest，复用 messy-small.csv 同构脏夹具；断言逐规则计数为已知字面量。
-- studio-api：vitest + fastify inject，走真实引擎与桥（live 集成，串行）。
-- studio-web：vitest 组件级（上传/详情渲染与 API mock 边界）；M1 不做 Playwright e2e（防范围膨胀，M2 引入）。
+- 只测外部行为；seam 不变（HTTP / CLI / adapter client 公共接口 + fetch 边界组件测试）。
+- adapter：回滚/重做矩阵契约测试（3 操作 × 回滚到 1 → 断言数据+历史 → 重做到 3 → 断言）；提取→回放闭环测试。
+- studio-api：清洗端点集成测试（应用→历史→回滚→重做→导出内容断言「广州市」已清洗；坏 GREL → 500 结构化且历史不变；孤儿回收断言项目计数不增）。
+- studio-web：工作台组件测试（面板渲染、操作分发 fetch 体断言、历史点击调用 restore、请求期间按钮禁用）。
+- 浏览器手动端到端验收（上传→替换→变换→回滚→重做→导出）记录进 tasks.md；**Playwright e2e 不进 M2**（M3 引入）。
 
 ## Out of Scope
 
-- 交互式清洗、操作历史、撤销（M2）；管道/调度（M3）；多源接入 DB/API（M4）；LLM 建议（M4）。
-- 多用户、RBAC、鉴权（本地单用户）。
-- 大文件（>100MB）异步任务化。
-- Docker 化、生产部署、pybridge 常驻进程化（实测 >10s 才在 M2 提前）。
+- 聚类去重 UI（compute-clusters）、facet 过滤、多列组合操作、reconciliation、GREL 之外表达式。
+- DatasetVersion 版本表/快照树（M3 随管道引入）；多用户并发；引擎实例池。
+- OpenRefine 原版 UI 的任何嵌入或复刻。
 
 ## Further Notes
 
-- 验收基线：浏览器端到端（上传→画像→跑分）+ API 独立可走全流程 + 全部测试绿。
-- 熔断可交付：切片按纵向排序，预算/审查熔断时以"已绿切片"为交付边界，未竟项明确移交。
+- 切片 0 的 getOperations 闭环若实测失败：裁掉 story 14（Recipe 下载）与 recipe 端点，M3 改走"记录用户操作原始 JSON"路线，其余不受影响。
+- 导出与预览一致反映当前（可能已回滚的）引擎状态——所见即所得。
 
 ## PRD 相对 proposal 的新增/变更（diff gate 清单）
 
-全部 **additive**（新增细节/红队建议落地），无对 proposal 决策的更改或删除：
+全部 **additive**（裁决开放问题/细化），无对 proposal 决策的更改或删除：
 
-1. monorepo 用 npm workspaces + 根 tsconfig.base.json（对齐 model-mlflow）。
-2. Python 版本策略：切片 0 spike 决定（3.14 优先，回退 3.12/3.13），依赖锁 uv.lock。
-3. pybridge 定为一次性子进程 CLI（stdin JSON → stdout JSON）。
-4. 数据流三件套明确：raw 内容寻址存储 + OpenRefine 项目注册 + pybridge 读 raw 算画像/规则。
-5. 元数据 SQLite 落到 M1（表结构 Postgres 兼容）。
-6. 前端 Tailwind + token 映射全局 DESIGN.md；Fastify v5 / React 19 定版。
-7. XLSX 解析归 pybridge（Polars read_excel）。
-8. 切片 0 = Python 环境兼容 spike（红队 kill-假设 1 的 cheapest test）。
-9. 契约测试补 CSRF/302 怪癖负例（M0 审查遗留项进 M1）。
-10. M1 不做 Playwright e2e（vitest 组件级 + 手动浏览器验收，M2 再上）。
+1. UI 形态裁决：详情页第四 tab「清洗」（非独立路由）。
+2. 值替换交互裁决：画像 top 值多选旧值 + 新值输入。
+3. 历史交互裁决：列表点击任意点回滚/重做 + 撤销/重做一步快捷按钮。
+4. Recipe JSON 下载进 M2（story 14），以切片 0 getOperations 闭环通过为前提。
+5. Playwright e2e 不进 M2（M3 引入），维持组件测试+手动浏览器验收。
+6. 清洗 API 五端点形态明确（operations/history/restore/export/recipe）。
+7. 文本变换限字符串列（画像 dtype 过滤）；UI 打磨 3 条具体化。
 
 ## GRILL 决议（自答，2026-09-27）
 
-零升级（全部有可辩护推荐，无 proposal 冲突，无不可逆）：
+零升级（全部实现细节级，有可辩护推荐）：
 
-- **G1 poc 目录去留**：`poc/openrefine` 的实现与用例**迁移**进 `adapters/openrefine` 后删除 poc/（git 保历史）——"演化"语义即移动，避免双份维护。
-- **G2 API 端点与计算时机**：上传时同步完成画像+跑分并存 SQLite（≤100MB 实测秒级）；端点：`POST /api/datasets`（multipart）、`GET /api/datasets`、`GET /api/datasets/:id`、`GET /api/datasets/:id/rows?offset&limit`、`GET /api/datasets/:id/profile`、`POST /api/datasets/:id/rules/validate`（重跑）。
-- **G3 raw 存储**：`workspace/datasets/<sha256>/<原文件名>`，扩展名决定 pybridge 解析方式；同内容重传复用（内容寻址天然去重）。
-- **G4 引擎托管**：studio-api 首个需要引擎的请求惰性启动 OpenRefine（固定端口 3333），进程 SIGINT/SIGTERM 钩子回收；M1 单实例。
-- **G5 Python 环境**：`pybridge/pyproject.toml` + `uv.lock` 入库；venv 落 `pybridge/.venv`（uv 惯例位，gitignored；REVIEW 轮 1 回签——原定 workspace/pybridge-venv，改为 uv 默认位以便 `uv run` 自动发现，实质约束"不入库"不变）。解释器实测 3.14.4（pandera 0.33.1 + polars 1.44.2）。
-- **G6 前端路由与交付形态**：React Router；开发模式根脚本并行起 vite dev + fastify dev；生产模式 vite build 产物由 fastify 静态托管（单进程交付）。
-- **G7 画像指标口径**：类型推断（int/float/string/date/bool）、空值率、基数、数值列 min/max/mean/P50/P90/P99、字符串列长度 min/max + top-k（k=10）；全部列给 top-k。
-- **G8 内置正则规则**：email、URL、日期（ISO）、中国大陆手机号（内置默认值，通用平台的出厂配置，非定制）。
-- **G9 UI 布局基线**：上传页=居中卡片落地页；详情页=DESIGN.md 工作台三栏范式（左列信息/列清单，中主视图三 tab：预览/画像/质量，右详情抽屉）；实现前读全局 DESIGN.md 取 token。
+- **H1 restore 收敛判据**：POST undo-redo 前先 getHistory 定位 lastDoneID 的目标位置（past 中该条序+1，或 future 前滚目标），POST 后轮询 get-history 直到 `past.length` 达标或 30s 超时——复用 M0 undoLast 已验证的轮询模式。
+- **H2 值替换旧值来源**：默认从画像 top_values 多选，允许手动补输自定义旧值（画像缺失的旧数据集也有出路）。
+- **H3 预览复用**：抽取 M1 PreviewTab 为共享组件，清洗 tab 内嵌同款分页预览（单一实现，两处使用）。
+- **H4 坏 GREL 行为**：切片 0 顺带实测（apply-operations 对非法表达式的响应形态），集成测试断言「结构化错误 + 历史不变」。
+- **H5 UI 打磨落点**：格式类（regex）违规胶囊统一 chip-warn；数字列已 tabular-nums，补 top 值胶囊内数字对齐；meta 级文字（10.5px）在白底场景统一用 text-2 而非 text-3。
