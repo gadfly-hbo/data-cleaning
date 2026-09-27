@@ -1,13 +1,13 @@
 # OpenRefine Web API 契约（M0 PoC 实测）
 
 > 引擎：OpenRefine **3.10.1**（GitHub Releases 官方 linux 发行包，2026-03-04 发布）。
-> 全部契约经 PoC 实测（2026-09-27，macOS arm64，Java 21 JRE），可复现用例见 `poc/openrefine/test/`。
+> 全部契约经 PoC 实测（2026-09-27，macOS arm64，Java 21 JRE），可复现用例见 `adapters/openrefine/test/`。
 > 用途：M1 `adapters/openrefine` 契约测试的基线。M1 开发者只需本文即可动手，无需会话记录。
 
 ## 1. 部署形态（本机实证）
 
 - mac 官方 DMG 为 **Intel-only**（JavaAppLauncher 是 x86_64 二进制，arm64 无 Rosetta 时无法运行）——不可用于 Apple Silicon headless。
-- 可行形态：**linux 发行包（`openrefine-linux-3.10.1.tar.gz`，shell 脚本 + jar，架构无关）+ Adoptium Temurin 21 JRE（mac arm64 tarball，钉死 jdk-21.0.12.1+1）**，两者解压到仓库 `workspace/` 内，零系统改动。一键安装：`node poc/openrefine/scripts/setup-engine.mjs`（幂等）。
+- 可行形态：**linux 发行包（`openrefine-linux-3.10.1.tar.gz`，shell 脚本 + jar，架构无关）+ Adoptium Temurin 21 JRE（mac arm64 tarball，钉死 jdk-21.0.12.1+1）**，两者解压到仓库 `workspace/` 内，零系统改动。一键安装：`node adapters/openrefine/scripts/setup-engine.mjs`（幂等）。
 - 许可证核查（proposal 硬约束）：OpenRefine BSD-3-Clause；Temurin JRE **GPLv2 with Classpath Exception**（允许与任意商业代码链接分发，商用可接受）。
 - 启动：`JAVA_HOME=<绝对路径> refine -p 3333 -i 127.0.0.1 -d <数据目录>`；`REFINE_MEMORY` 环境变量控制堆（默认发行包 refine.ini 写 1400M）。
 - **JAVA_HOME 必须绝对路径**：refine 脚本在自身目录下解析相对路径，相对 JAVA_HOME 会报 "Could not find the 'java' executable"。

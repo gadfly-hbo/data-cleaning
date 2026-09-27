@@ -1,53 +1,44 @@
-# REVIEW 轮 1 发现（code-reviewer 子代理，fresh context，2026-09-27）
+# REVIEW 轮 1 发现（M1，code-reviewer 子代理，fresh context，2026-09-27）
 
 ## 审查结论
-**FAIL（REQUEST_CHANGES）** — 核心链路（无 UI 起停引擎、建项目→操作→历史→撤销→导出→删除）实现正确、测试真实通过、契约文档主体与代码实测一致；但 100MB 性能实测的 RSS 数据被证实测错了进程（测到的是 Chrome，不是引擎 JVM），该无效数据已写进正式交付物契约文档并衍生出一条影响 M1 决策的架构推论，必须修正后此文档才能作为 M1 基线。
+VERDICT: REQUEST_CHANGES — M1 骨架完整、分层清晰，verify 证据亲自重跑全部复现（JS 21 passed/1 skip + py 8 passed + 双 tsc 0 错误），但有 2 个阻断性缺陷：质量报告对数值形态列存在已实证的假阴性，以及迁移残留导致 README 记载的 PERF 命令在全新 clone 下必挂。
 
 ## 阻断性问题（BLOCKER）
-- [poc/openrefine/test/perf-100mb.test.ts:18-19 + docs/spikes/openrefine-api-contract.md:101-105,115] 性能实测 RSS 测错进程，契约文档录入了无效证据并衍生错误推论
-  证据：`javaRssMb()` 用 `lsof -ti tcp:3333` 取 PID 后 `.split("\n")[0]` 取第一行。对照实验实测该命令返回 `["15520(Chrome)","64221(node)","64222(java)"]`——第一行是 Chrome Helper；Chrome 在本机只要有进程监听 3333/3334 就会主动连上来（两次独立复现）。真实监听的 java 进程空闲 RSS 即 353MB，而记录值仅 74–80MB（原记录 78/78/74；重跑 PERF 得 80/79/78，错配稳定复现）；Chrome 当时 RSS 88.9MB，量级吻合。另 `peak:74` 低于 `afterCreate:78`，也证明它不是峰值而是错进程的噪声采样。
-  后果：契约文档 §6「引擎进程 RSS 峰值 <100MB，实测 74–78MB」与 §7 表格「进程内存 <100MB，优于阈值 80 倍」均为无效测量；§6「重要修正」段据此断言「OpenRefine 项目存储是磁盘化/惰性的、design.md §7 内存担忧不成立」——这条推论无有效数据支撑，却会直接改写 M1 的采样/分块策略决策。（go/no-go 结论本身不受翻转：Xmx=2048M 下 RSS 结构上到不了 8GB，且三步闭环与耗时数据真实。）
-  复检判据：修正后 PERF 重跑的 RSS 应为数百 MB 量级，与文档一致。
+- [pybridge/src/pybridge/rules.py:62+98] 正则规则对非字符串列静默假阴性：pa.Column(str, str_matches) 在列 dtype 为 Int64 时产生无行号的 dtype 级失败，_pandera_check 丢弃无索引失败 → 全数字手机号列（无引号 CSV 常见形态）violations=0 谎报通过。实证：CSV `phone\n12345\n123\n999` → 0 违规（实际 3 行全非法）。击穿 PRD story 5 可信度。复检判据：该用例 violations=3。
+- [adapters/openrefine/test/perf-100mb.test.ts:35] 迁移残留：cwd 指向已删除的 ../poc/openrefine，README 的 PERF 命令在全新 clone（无 workspace/messy-100mb.csv 掩盖）下 ENOENT。违反切片 1「无残留引用」与切片 8「按 README 可跑通」。复检判据：移走 100MB 夹具后 PERF 命令能进生成流程。
 
 ## 建议改进（SUGGESTION）
-- [poc/openrefine/src/engine.ts:83-84] `startEngine` 健康检查失败时泄漏孤儿引擎——`waitHealthy` 抛错路径没有 kill 已 spawn 的 detached 子进程组。建议在 `startEngine` 内 try/catch 失败即 `kill(-pid)`。
-- [poc/openrefine/src/engine.ts:51-59] 切片 1 验收「首次运行自动完成下载与解包」未实现——`ensureInstalled` 只做存在性检查并报错要求手工下载，属对 tasks.md 验收条款的静默降级。建议补幂等下载脚本或正式回签降级。
-- [poc/openrefine/test/apply-operations.test.ts:39-45] PRD story 5 / 切片 3 的「trim 操作」被 `value.toLowercase()` 替代——契约文档 §3 怪癖 4 记录了合理原因，但规格未回签。建议在 PRD/tasks 标注此适配。
-- [docs/spikes/openrefine-api-contract.md:83-90] 切片 5 验收「带证据链接」未兑现——§5 只有 issue 号与口头声明，全文无 URL。建议补 3.10.0/3.9.0 release notes 与 #6077 的链接。
-- [poc/openrefine/src/client.ts:44-47] `createProject` 守卫拦不住缺参场景——Location 缺 `?project=` 时 `Number(null)===0`，`Number.isFinite(0)` 为 true，静默返回 projectId=0。建议先检查原始参数非空再转数值。
-- [poc/openrefine/src/engine.ts:32] JRE 下载 URL 用 `latest/21` 浮动版本——削弱「版本锁定」复现性；建议 pin 到具体 Temurin 版本。
-- [poc/openrefine/test/*.test.ts:12-20] 三个文件重复同一段起停样板——可提取共享 helper 或改 globalSetup（非阻断）。
-- 契约文档 9 个怪癖均为手工实测，无常驻负例——M1 契约测试至少覆盖 CSRF 查询参数与 302 两个怪癖（M1 范围）。
+- [services/studio-api/src/engine-manager.ts:17-36] stop() 不等待在途 starting → 首次上传引擎引导期内退出会孤儿化 detached 引擎（PRD story 8 窄窗口）。
+- [apps/studio-web/src/pages/UploadPage.tsx:114] 列表格式 chip 恒显示 "csv"（服务端 name 已去扩展名，endsWith(".xlsx") 恒 false）。
+- [apps/studio-web/src/pages/DatasetPage.tsx:82] onRefreshed 传入 QualityTab 但 rerun 从不调用：重跑后切 tab 回显旧报告。
+- [services/studio-api/src/app.ts:104-105 + UploadPage.tsx:95] 「未创建数据集」文案不总为真：insertDataset 之后 pybridge 失败时数据集已入库。
+- [server.ts:1 + engine.ts:19] 注释/命名过期：0.0.0.0 注释 vs 实际 127.0.0.1 绑定；POC_ROOT 变量名失义。
+- 测试负例缺口：空文件上传分支、XLSX 全链路（studio-api 层）、PyBridgeExecutor 真实非零退出/超时/坏 JSON 路径零覆盖（审查者已实测行为正确，降为覆盖建议）。
+- [docs/spikes/openrefine-api-contract.md:4,10] poc/ 路径引用悬空（M0 冻结文档，路径需随迁移更新）。
 
 ## 待确认（UNVERIFIED）
-- 新增开源件 Temurin JRE（GPLv2+CE）的许可证核查未在 diff 中留痕——proposal 硬约束要求「新增开源件先核许可证」；GPLv2+Classpath Exception 通常商用可接受，需补核查记录。
-- 契约文档 §5 的 release notes / issue 检索结论未联网独立复核。
-- Chrome 主动连接 3333/3334 的根因未深究（仅两次实证现象），换机器跑 PERF 不一定能复现错配，但探针缺陷客观存在。
+- tasks.md 各切片 acceptance criteria 子项 checkbox 未逐一勾选（作者习惯：勾 task 级、验收证据在记录节）；切片 0「解释器版本记录在案」落点在 state.json history（py3.14.4），需补进 tasks 记录。
+- GRILL G5 venv 位置偏差（workspace/pybridge-venv → pybridge/.venv）已在 state history 记录，需回签进 PRD。
 
 ## 覆盖确认
-- 已检查：diff 全部文件逐行；spec 三件套逐条对照（12 条 user story、6 切片验收、4 条硬约束）；亲自重跑 `npm test`（4 passed | 1 skipped，exit 0）与 `npx tsc --noEmit`（exit 0），与 VERIFY 证据完全一致；重跑 PERF=1 用例（timings 可复现，RSS 错配复现）；空闲/负载引擎 RSS 与 lsof 探针对照实验；测试前后孤儿进程与端口检查（干净）；测试 seam 审查（仅打公共接口 seam，无 mock、无同义反复）。
-- 未检查：契约文档 §5 外部检索结论的联网复核；package-lock 依赖树完整性；100MB 导出产物逐行内容比对；Chrome 连接行为根因。审查者重跑 PERF 只写入/恢复了 gitignored 的 workspace/ 运行期产物，仓库受控文件与审查开始时状态一致。
+- 已检查：全部新增/迁移源码逐文件（adapters 4src+6test、studio-api 5src+2test、studio-web 7src+2test、pybridge 5模块+3test、配置/README/.gitignore）；verify 完整重跑复现；额外实证 3 项（执行器故障路径、数值列假阴性 ×3 输入、100MB 夹具/poc 存在性）；SQLite 参数化、路径穿越、G2/G7/G8 口径、DESIGN token、新依赖许可证——查过，除上述外无发现。
+- 未检查：浏览器手动验收（信任 tasks.md 记录）；生产模式 build 托管实测；PERF=1 实跑；lock 文件逐行；M0 零改动迁移文件深审。
 
 ---
 
-# REVIEW 轮 2 发现（code-reviewer 子代理，fresh context，2026-09-27）
+# REVIEW 轮 2 发现（M1，fresh code-reviewer，2026-09-27）
 
 ## 审查结论
-**PASS（APPROVE_WITH_COMMENTS）** — 轮 1 的唯一 BLOCKER（RSS 测错进程）已正确修复且经独立复跑 PERF 验证（RSS 1385/1775/1584MB，确为 LISTEN 的 java 进程）；8 项建议中 6 项已修复或回签、2 项按契约记录为 M1 刻意不改；未发现修复引入的阻断性缺陷，仅余 3 条低severity 的证据一致性/健壮性建议。
+VERDICT: PASS（APPROVE_WITH_COMMENTS）— 轮 1 的 2 BLOCKER + 6 建议 + 2 待确认全部处置到位（5 修复 + 1 记录不改 + 2 回签），verify 全链路亲自重跑复现（exit 0），修复经独立边界实证未引入新缺陷（数值列正则另做 5 组边界：null 不计/混类型正确/合法值无假阳/全 null 不崩/浮点计违规语义一致）。
 
-## 阻断性问题（BLOCKER）
+## 阻断性问题
 无。
 
-## 建议改进（SUGGESTION）
-- [docs/spikes/openrefine-api-contract.md:99-103 vs workspace/perf-100mb.json] §6 表格耗时列与自证产物不一致：表格写 2.1s/1.5s/0.8s（修复前旧运行），perf-100mb.json 记录 1523/960/685ms；RSS 列与 JSON 吻合——同表混源。量级无害（均远低于 5min 判据，结论不变）。建议：耗时列与 JSON 一致或注明出处。复检判据：表格三格耗时与 perf-100mb.json 的 timings 一致或注明出处。
-- [poc/openrefine/scripts/setup-engine.mjs:30-36] 中断的下载使「中断后重跑安全」不成立：existsSync 判跳过 + 下载中途被杀留下坏 tarball，tar 反复失败需手工删文件。建议：下载到临时文件名成功后 rename。复检判据：杀掉下载中的 curl 后重跑脚本能自愈。
-- [poc/openrefine/src/engine.ts:33-34] JRE_URL 常量声明后从未使用，钉死版本在两文件重复（漂移风险）。建议：删除死常量或单一模块导出共享。复检判据：rg JRE_URL src/ 无未使用声明。
-
-## 待确认（UNVERIFIED）
-- 契约文档 §5 检索内容的逐条联网复核（4 个链接可达性已验证）；内容真实性留给作者（本轮会话中由作者经 gh api 原始输出取得）。
-- 契约文档 §3「其他已确认存在（未实测）」端点清单为作者观察（文档已如实标注）。
+## 建议改进（3 条，均记录不阻断）
+- 桥失败时孤儿 OpenRefine 项目累积（换序副作用）→ M2 补偿。
+- 「桥失败→零入库」无测试锁定 → 作者已补测试（上传后列表长度不变断言）。
+- /usr/bin/false、/bin/echo 平台绝对路径 → Linux CI 复用时注意。
 
 ## 覆盖确认
-- 轮 1 全部 9 项处置逐条核对通过（BLOCKER+8 建议，含 2 项按契约记录为 M1 不改）。
-- 亲自验证：npm test（4 passed | 1 skipped，exit 0）与 npx tsc --noEmit（exit 0）与派发证据一致；PERF=1 独立复跑通过；两次运行后端口释放、无孤儿进程；导出产物旁证与契约 §6 验证行逐字吻合；fixture 行序与断言吻合。
-- 范围检查：仅 .gitignore（+4 行）与预期 untracked 路径，无超范围改动，无测试削弱。
+- 已检查：轮 1 全部修复点逐条对照源码与测试；verify 完整重跑；.flow 文档改动确认为 M1 flow 自身文档生命周期而非规格事后改写。
+- 未检查：PERF=1 实跑（信任作者复检记录+代码核对）；浏览器验收与生产 build 实测（信任 tasks.md 记录）。

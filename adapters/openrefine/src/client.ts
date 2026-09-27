@@ -78,6 +78,25 @@ export class OpenRefineClient {
     return (cell?.v as string | undefined) ?? null;
   }
 
+  /** 分页读行，按列对齐成值矩阵（行尾空单元格补 null；越界自动截断）。 */
+  async getRows(
+    projectId: number,
+    start: number,
+    limit: number,
+  ): Promise<{ total: number; columns: string[]; rows: unknown[][] }> {
+    const columns = await this.getColumns(projectId);
+    const data = (await this.getJson(
+      `/command/core/get-rows?project=${projectId}&start=${start}&limit=${limit}`,
+    )) as {
+      total?: number;
+      rows?: Array<{ cells?: Array<{ v?: unknown } | null> }>;
+    };
+    const rows = (data.rows ?? []).map((r) =>
+      columns.map((_, i) => r.cells?.[i]?.v ?? null),
+    );
+    return { total: data.total ?? rows.length, columns, rows };
+  }
+
   /** 按序应用操作（OpenRefine 操作 JSON 数组）。返回逐条 historyEntry。 */
   async applyOperations(projectId: number, operations: unknown[]): Promise<unknown[]> {
     const data = (await this.postForm(

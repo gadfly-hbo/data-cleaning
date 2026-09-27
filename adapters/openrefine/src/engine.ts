@@ -16,8 +16,8 @@ export const REPORTED_VERSION = "3.10-SNAPSHOT [TRUNK]";
 
 export const ENGINE_PORT = 3333;
 
-const POC_ROOT = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(POC_ROOT, "../../..");
+const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(SRC_DIR, "../../..");
 const WS = path.join(REPO_ROOT, "workspace");
 const DIST = path.join(WS, "dist", `openrefine-${ENGINE_VERSION}`);
 const JRE_DIR = path.join(WS, "jre");

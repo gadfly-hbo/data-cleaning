@@ -8,9 +8,7 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
-    "outDir": "dist",
     "declaration": false,
     "sourceMap": false
-  },
-  "include": ["src", "test", "vitest.config.ts"]
+  }
 }

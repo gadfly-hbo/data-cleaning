@@ -1,0 +1,22 @@
+{
+  "name": "data-cleaning",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "adapters/*"
+  ],
+  "scripts": {
+    "test": "npm test --workspaces --if-present",
+    "setup:engine": "node adapters/openrefine/scripts/setup-engine.mjs",
+    "setup:pybridge": "cd pybridge && uv sync",
+    "dev": "concurrently -n api,web -c teal,blue \"npm run dev -w @data-cleaning/studio-api\" \"npm run dev -w @data-cleaning/studio-web\"",
+    "build:web": "npm run build -w @data-cleaning/studio-web",
+    "start": "npm run build:web && npm run start -w @data-cleaning/studio-api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@data-cleaning/adapter-openrefine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenRefine headless 引擎 adapter：HTTP 客户端 + 生命周期托管 + 契约测试（M0 PoC 用例集演化）",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./engine": "./src/engine.ts",
+    "./client": "./src/client.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

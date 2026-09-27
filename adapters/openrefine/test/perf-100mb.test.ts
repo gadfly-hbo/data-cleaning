@@ -32,7 +32,9 @@ test.skipIf(!process.env.PERF)(
   { timeout: 900_000 },
   async () => {
     if (!existsSync(LARGE_CSV)) {
-      execSync("node scripts/gen-large-csv.mjs", { cwd: path.resolve(WS, "../poc/openrefine") });
+      execSync("node scripts/gen-large-csv.mjs", {
+        cwd: path.resolve(WS, "../adapters/openrefine"),
+      });
     }
     const sizeMb = Math.round(statSync(LARGE_CSV).size / 1024 / 1024);
     expect(sizeMb).toBeGreaterThanOrEqual(100);

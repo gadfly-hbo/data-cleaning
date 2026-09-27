@@ -1,45 +1,45 @@
-# Red-Team: M0 — OpenRefine headless PoC（建项目→应用操作→导出 API 闭环）
+# Red-Team: M1 — 产品壳（Fastify+React）+ adapters/openrefine + pandera 规则桥
 
-> 评审对象：`.flow/proposal.md`。日期：2026-09-27。结论：**go**（无 kill 准则已被满足；排名第一的假设正是 PoC 要测的，测试即行动）。
+> 评审对象：`.flow/proposal.md`。日期：2026-09-27。结论：**go**，但把「pybridge Python 环境兼容性」提为首切片风险燃烧项。
 
 ## Top Kill-Assumptions（按 影响×看错概率×测试成本 排序）
 
-### 1. OpenRefine 的 Web API 能纯 headless 驱动完整闭环
-- **Claim**: 不开浏览器，仅凭 HTTP 就能 建项目(CSV)→应用操作→导出。
-- **Steelman**: 官方文档有 Web API 参考（docs.openrefine.org/technical-reference/web-api）；社区存在多个第三方客户端库（Python/JS），说明 API 对外可用；OpenRefine 本身是"服务端 + 薄前端"架构，UI 逻辑基本都走 `/command/core/*`。
-- **Fails if**: 任一环节只有前端本地逻辑才能完成（如操作 JSON 只能由 UI 生成且格式无文档），或导出/建项目依赖浏览器会话状态（CSRF/cookie 强绑定）且无程序化 workaround。
-- **Evidence to get this week**: PoC 本身（1–2 天时间盒内）。
-- **Kill criterion**: 三步闭环任一步纯 API 无法完成 → 引擎路线 no-go，M1 退回 design.md §8 的 v1 自研 Polars 内核。
-- **Cheapest test**: 本地起服务，curl 依次打 建项目/apply-operations/export 三个端点。
+### 1. pandera + Polars 在本机 Python 3.14.4 上可用
+- **Claim**: pybridge 能在现有 Python 环境装齐 pandera/Polars 并稳定执行（一次性子进程形态）。
+- **Steelman**: 本机有 uv（可任意装 3.12/3.13 解释器）；pandera 与 Polars 都是一线活跃库，wheel 覆盖主流版本。
+- **Fails if**: Python 3.14 太新导致 pandera（其 pandas 依赖链）或 Polars 无对应 wheel / 运行期坑，被迫锁旧解释器。
+- **Evidence to get this week**: 首切片 spike：`uv venv` + 装 pandera+polars + 脏 CSV 一次规则跑分，一次画像计算。
+- **Kill criterion**: 3.12/3.13 下也不可用（几乎不可能，届时换库：规则层可退 pandera→纯 Polars 实现，画像本就 Polars）。
+- **Cheapest test**: 15 分钟 spike。
+- **评注**: 即便 3.14 不可用，uv 装 3.12 的回退路径干净——这是"可测且低风险"的假设，但必须第一个测。
 
-### 2. 单机性能满足 M1 目标（≤100MB 文件秒级~分钟级交互）
-- **Claim**: 内存型引擎在产品目标规模内可用。
-- **Steelman**: OpenRefine 常规处理几十万行表格；100MB CSV 约 50–100 万行，在其典型负载边缘内。
-- **Fails if**: 100MB 建项目耗时超过分钟级一个量级（如 >5 分钟）或内存膨胀失控（>8GB），交互体验崩坏。
-- **Evidence to get this week**: PoC 附带一次 100MB 实测（脚本生成脏数据），记录耗时与进程 RSS。
-- **Kill criterion**: 超阈值 → 条件 go：采样交互 + worker 全量分块提前进 M1 设计，或启动列式内核备选评估。
-- **Cheapest test**: `yes` 生成或脚本生成 100MB CSV，建项目计时。
+### 2. 一轮 dev-flow 能交付 M1 全量（产品壳+前端+adapter+桥）
+- **Claim**: 四组件在一个 flow 预算内（默认 60 turns / 12h 墙钟）完成并过双轴审查。
+- **Steelman**: M0 六切片一轮完成且余量充足；M1 有 M0 契约与 model-mlflow 工程范式直接参照，前端是标准 CRUD 级页面。
+- **Fails if**: 前端视觉细节（DESIGN.md 三栏外壳等）吃掉过量轮次，或审查返工超 3 轮熔断。
+- **Evidence to get this week**: 拆解时把切片按"纵向可交付"排序，预算熔断时保已绿切片为交付边界。
+- **Kill criterion**: 熔断时已绿切片构成最小可用产品壳（上传+画像可见），剩余明确移交下轮。
+- **Cheapest test**: 拆解本身（ISSUES 阶段执行）。
 
-### 3. API 行为在小版本内足够稳定，可被契约测试锁定
-- **Claim**: 锁定版本 + 契约测试能兜住升级风险（design.md §7 对策的前提）。
-- **Steelman**: OpenRefine 大版本节奏慢（3.x 多年），API 变动少且 release notes 透明。
-- **Fails if**: 小版本间频繁破坏 API 且无标注，契约测试维护成本压过复用收益。
-- **Evidence to get this week**: 查 OpenRefine GitHub issues/release notes 中 API breaking 记录的频率。
-- **Kill criterion**: 当前大版本内出现多次未标注 breaking → 锁死补丁版本 + 把"换引擎成本"上调，重新权衡 adapter 投入。
-- **Cheapest test**: 30 分钟 issue/release 检索（可并入 PoC 期间）。
+### 3. 一次性子进程桥的性能可接受（画像/跑分延迟）
+- **Claim**: 每次画像/规则跑分 spawn 一次 Python（冷启动 + 读文件 + 计算）在 ≤100MB 文件下体验可接受。
+- **Steelman**: M0 实测 OpenRefine JVM 冷启动 ~6s 已可接受；Python 冷启动 <1s；Polars 100MB 统计 <1s 级。
+- **Fails if**: 100MB 文件跑分冷启动链路超 ~10s 量级且用户感知差（M1 无交互频率，风险低）。
+- **Kill criterion**: 实测 >10s 则 M2 引入常驻桥（架构已在 adapter 边界内，不破契约）。
+- **Cheapest test**: 首切片 spike 顺带计时。
 
 ## What's Well-Reasoned
 
-- **M0 作为风险先行的 spike**：排名第一的 kill 假设恰好是最便宜可测的，PoC 就是它的 cheapest test——计划结构本身成立。
-- **复用优先 + adapter 隔离**：与 model-mlflow 已验证的工程模式同构，降低架构发明风险；v1 自研内核作为已备案的退路，决策不孤注一掷。
-- **许可证前置排查**：soda-core 的 ELv2 陷阱已在选型阶段剔除，M0 引擎（BSD-3）无商用障碍。
-- **时间盒 1–2 天 + spike 定位**：防止 PoC 蔓延成产品开发。
+- 组件分解与 model-mlflow 已验证范式一一对应（壳/adapter/子进程桥），无架构发明。
+- M0 契约文档 + 可演化用例集把 adapters/openrefine 从高风险变成搬运工。
+- 只读诊断的 M1 边界清晰，不碰 M2 的交互复杂度。
+- 许可证/lock/workspace 纪律已内化进提案。
 
 ## What I Couldn't Assess
 
-- OpenRefine 在长驻服务形态下的资源回收行为（workspace 泄漏、缓存增长）——单次 PoC 测不到，M1 实例管理时验证。
-- 用户侧部署形态（单机自用 or 多租户服务）对 JVM 运维成本的真实承受度——产品商业化问题，超出 M0。
+- 部署形态预期（单机自用 or 后续要打包分发）——影响 pybridge 打包方式，M1 按 uv 本机环境处理。
+- 用户对 UI 完成度的验收标准（可用 vs 精致）——DESIGN.md 是唯一基线，切片按"可用+合规"交付。
 
-## 对 M0 的净结论
+## 净结论
 
-按原计划执行 go。建议（不改变提案决策）：把 kill-假设 2 的 100MB 实测并入 PoC 交付物；把 kill-假设 3 的 30 分钟检索作为 PoC 期间的并行核查项。两者都是 additive，是否纳入由 PRD 阶段定。
+go。把 kill-假设 1（Python 兼容 spike）设为切片 0/1；拆解必须保"熔断可交付"属性。

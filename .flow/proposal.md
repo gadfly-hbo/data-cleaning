@@ -1,33 +1,36 @@
-# M0 提案 — OpenRefine headless PoC（讨论稿固定）
+# M1 提案 — 产品壳 + adapters/openrefine + pandera 规则桥（讨论稿固定）
 
-> 来源：本仓 docs/design.md v2（commit 33fcedf）确立后，用户以 `/dev-flow 开始 M0` 启动。
-> 本文固定 M0 启动前的全部已决策内容；后续阶段以本文为最高规格事实源。
+> 来源：M0 flow DONE 后（commit 2f4c42a，go 结论），用户启动 `/dev-flow 开始 M1`，目标原文：
+> 「产品壳（Fastify + React）+ adapters/openrefine（契约测试即 PoC 用例集演化）+ pandera 规则桥」。
+> 规格上位源：docs/design.md v2（M1 行：产品壳 + adapters/openrefine + 画像 + pandera 内置规则报告；验收=上传→画像→规则跑分端到端）。
+> M0 交付物契约：docs/spikes/openrefine-api-contract.md。
 
-## 背景与产品定位（已决策，M0 不可重议）
+## 背景与既定决策（M1 不可重议，继承 design.md v2 / M0）
 
-- 数据清洗平台，**通用定位，双形态**：交互式工作台（业务/分析人员）+ 清洗管道（数据团队）。
-- **产品模式对齐 model-mlflow**（用户原话：产品思路与 model-mlflow 一致，用开源的工具做自己的产品）：自研 TS 产品壳（Fastify + React 19 + Vite，遵循 DESIGN.md / JuanerAI Xanthil），开源引擎经 `adapters/` 隔离接入，`core/*` 零引擎依赖，长任务走 Worker Bus。用户明确要求：**能直接用开源的就直接拿来使用，不从零开发**。
-- 选型（许可证已核实，2026-09-26）：OpenRefine（BSD-3，交互式清洗引擎，headless + HTTP API）、pandera（MIT，规则执行）、Dagster（Apache-2，M3 管道）、dedupe（MIT）、SeaTunnel（Apache-2，后期）。**soda-core 因实为 Elastic License 2.0 已剔除**。
-- 核心机制：Recipe ≡ OpenRefine 操作历史 JSON；数据不可变（版本 DAG）；每工作区独立 OpenRefine 实例；规则声明式 JSON；画像薄层自算；元数据 SQLite 起步。
-- 里程碑：M0 PoC → M1 产品壳+adapter+画像+规则 → M2 工作台交互 → M3 管道（Dagster）→ M4 多源/治理/LLM 建议。
+- 产品模式对齐 model-mlflow：**自研 TS 产品壳**（Fastify 服务端 + React 19 + Vite 前端），开源引擎经 `adapters/` 隔离接入，`core/*` 零引擎依赖，TS 优先、Python 仅存在于子进程桥。
+- UI 遵循全局设计规范（~/.zcode/design/DESIGN.md，JuanerAI Xanthil）；仓库无项目级 DESIGN.md 时以全局为基线。
+- OpenRefine 3.10.1 经 `adapters/openrefine` 接入（headless，契约文档 + PoC 用例集为基线，M1 契约测试即 PoC 用例集演化）。
+- 规则引擎 pandera（MIT），Python 子进程桥形态（同 model-mlflow 形态 B）。
+- 画像：薄层自算（Polars），结构化 JSON 输出。
+- 引擎内存型已实证（100MB≈1.8GB RSS）：M1 单用户同步执行，文件 ≤100MB，CSV/XLSX（单 sheet、首行表头）。
+- 内置规则集（M1）：非空、唯一、类型、值域（数值/日期范围）、正则格式；逐规则报告=违反行数/率/样例违规行。
+- 画像指标（M1）：列级空值率、基数、min/max/分位数、top-k、类型推断。
+- 许可证硬约束（新增开源件先核许可证）；依赖锁进 lock 文件不追 latest；workspace/ 运行期不入库。
+- M1 是只读诊断形态（上传→画像→规则跑分），交互清洗在 M2。
 
-## M0 目标（本 flow 范围）
+## M1 目标（本 flow 范围）
 
-- **OpenRefine headless PoC**：无 UI 起服务，API 完成 **建项目(CSV) → 应用操作 → 导出** 全链路。
-- 目的：烧掉最大集成风险——OpenRefine Web API 是其自用接口、非稳定公开契约（design.md §7 风险第一条）。
-- 验收要点（design.md §6 原文）：最大集成风险先烧掉；API 行为记录进 adapter 契约。
-- 时间盒：1–2 天。
-- 性质：spike——产出是证据与契约记录，不预支产品代码（M1 及以后才做产品壳）。
+端到端：用户在 Web 上传 CSV/XLSX → 自动生成列画像 → 内置规则集跑分出质量报告 → 可浏览。四组件：
 
-## 硬约束
+1. `services/studio-api`（Fastify）：数据集上传/列表/详情 API、画像与规则跑分触发、OpenRefine 引擎生命周期托管。
+2. `apps/studio-web`（React + Vite）：上传页 + 数据集详情页（画像视图 + 质量报告视图）。
+3. `adapters/openrefine`：由 `poc/openrefine` 演化（client/engine 迁入，契约测试 = PoC 用例集演化）。
+4. `pybridge`（Python + uv）：pandera 规则执行 + Polars 画像计算，JSON 进出。
 
-- 开源件许可证必须商用友好，新增开源件先核许可证（ELv2/AGPL 一票否决）。
-- 复用优先：能用 OpenRefine 现成能力就不自研。
-- 不修改 OpenRefine 源码（fork 是最后手段，M0 不做）。
+## 开放问题（proposal 未定，留给 PRD/GRILL）
 
-## 开放问题（proposal 未定，留给 PRD/GRILL 展开）
-
-- PoC 驱动脚本的技术形态（TS 与产品壳同栈 / Python / bash+curl）。
-- OpenRefine 获取方式（brew / 官方发行包 / Docker）与版本锁定策略。
-- 契约记录的格式与仓库内存放位置。
-- 100MB 性能实测是否纳入 M0 范围。
+- monorepo 工具与目录组织（npm workspaces？根 tsconfig 组织）。
+- Python 版本与依赖锁定（本机 3.14.4；pandera/Polars 对 3.14 的 wheel 兼容性未验证）。
+- pybridge 通信形态（一次性子进程 vs 常驻进程）。
+- 数据流细节：上传文件与 OpenRefine 项目的关系（画像/规则读什么）。
+- 前端样式落地方式（Tailwind token 映射？）与 XLSX 解析归属（TS 侧 or pybridge 侧）。
