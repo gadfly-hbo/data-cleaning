@@ -1,44 +1,42 @@
-# Red-Team: M3 — 清洗管道（Recipe 定版→执行→调度→监控→质量对比）
+# Red-Team: M4 — xlsx 完整支持 + 血缘审计 + LLM 清洗建议 + 生产化补课
 
-> 评审对象：`.flow/proposal.md`。日期：2026-09-27。结论：**go**，但把「Dagster 集成深度的成本收益」升级为 PRD 必答的第一决策，并以「管道执行闭环（无调度）」为熔断保底切片。
+> 评审对象：`.flow/proposal.md`。日期：2026-09-27。结论：**go**——范围裁剪是本提案最重要的决策，方向正确；两个技术假设需在切片 0/1 实测。
 
 ## Top Kill-Assumptions（按 影响×看错概率×测试成本 排序）
 
-### 1. Dagster 在本产品形态下净收益为正（集成深度决策的前提）
-- **Claim**: 引入 Dagster 比轻量自研（studio-api 内置定时器 + 现有 adapter 串步骤）更值得。
-- **Steelman**: 成熟的重试/并发/可观测/资产血缘；design.md v2 选型即它；Apache-2 许可干净。
-- **Fails if**: 常驻 daemon 的运维成本与 M3 单用户本地形态不匹配（用户要为一条管道常驻一个 JVM 级重量的 Python 进程组）；或 Python 3.14 下 dagster wheel 不可用/有坑。
-- **Evidence to get this week**: 切片 0 spike：uv 装 dagster（3.14 兼容性）+ 进程内定义 job 并 materialize 一个最小管道（echo 步骤）+ 计时。
-- **Kill criterion**: ①3.14 不可用且降级成本高 ②进程内物化无法覆盖调度需求且 daemon 常驻被否 → 降级 C 方案（自研执行，Dagster 移出 M3，design.md 记录偏差）。
-- **Cheapest test**: 30 分钟 spike。
+### 1. xlsx→csv 转换路线能产生与 CSV 等价的引擎体验
+- **Claim**: pybridge 用 polars 读 xlsx → 写规范 CSV → 进引擎，即可获得全功能（清洗/管道/版本）。
+- **Steelman**: polars read_excel（calamine）已在画像/规则链路稳定工作（M1 起）；转换是无新依赖的纯函数；引擎侧 CSV 契约全部实证。
+- **Fails if**: xlsx 的富语义在 CSV 形态丢失到影响清洗价值（日期变字符串、精度丢失、合并单元格/多 sheet 数据错读）。
+- **Evidence to get this week**: 切片 0 实测：构造含日期/数字/空值/中文的 xlsx → 转换 → 引擎全链路（清洗/管道/导出）与语义断言。
+- **Kill criterion**: 转换丢列/错值 → 回退 importing-controller 探测（备选路线，工作量 +1 切片）；仅格式化差异（如日期变 ISO 字符串）→ 接受并记录口径。
+- **Cheapest test**: 30 分钟。
 
-### 2. 管道执行闭环（Recipe 重放→版本产物→前后对比）在真实规模数据上可靠
-- **Claim**: 用 M2 实证的回放闭环构建管道执行，产物与质量对比正确。
-- **Steelman**: 闭环已契约测试常驻；质量跑分 100MB 0.7s；引擎 100MB 建项目 2s。
-- **Fails if**: 数据源更新后（schema 变化/列消失）Recipe 重放半途失败留下不一致状态。
-- **Evidence to get this week**: 切片测试覆盖"列消失数据源上管道运行 → 结构化失败 + 无版本产物"。
-- **Kill criterion**: 引擎 apply 非原子（与 M2 审查实证的原子性矛盾）→ 需要引入补偿。
-- **Cheapest test**: 管道执行切片的负例。
+### 2. LLM 建议在"无内置密钥、用户自配端点"约束下可用且可测
+- **Claim**: OpenAI 兼容端点配置化（默认关）+ stub 测试能覆盖行为；建议经用户确认才应用，无自动执行面。
+- **Steelman**: 建议输出 = GREL/mass-edit JSON（与现有 apply 端点同构）；stub 下单测确定性；边界声明是纯 UI。
+- **Fails if**: LLM 输出不稳定 JSON → 应用失败率高。缓解：响应经 JSON 解析校验 + 失败结构化重试提示；建议面板永远"预览后人工应用"。
+- **Kill criterion**: 真实端点上建议可用率过低（<50% 可解析）→ 降级为"仅文本建议、不生成可应用 JSON"。
+- **Cheapest test**: stub 单测（切片内）；真实端点验收留给用户配好后手动。
 
-### 3. 一轮 flow 交付六组件（管道+版本+调度+监控+对比+UI）的预算
-- **Claim**: M0/M1/M2 均单轮完成，M3 同样可完成。
-- **Steelman**: 管道执行的核心闭环（回放/跑分/导出）全部有 M1/M2 资产；新增主要是编排与 UI。
-- **Fails if**: Dagster 集成消化成本超预期。
-- **Kill criterion**: 熔断时保底交付=「管道实体+手动触发执行+版本产物+对比视图」（无调度），调度独立成 M3.5——拆解必须让"执行闭环"先于"调度"绿。
-- **Cheapest test**: 拆解顺序本身。
+### 3. 一轮交付四组件的预算（M3 用满 3 轮审查）
+- **Claim**: 转换/血缘/LLM 三线各自轻量（前两个是既有资产的组装），可一轮完成。
+- **Fails if**: xlsx 转换边界情况泛滥或 LLM 面板交互膨胀。
+- **Kill criterion**: 熔断保底 =「xlsx 等价 + 孤儿清扫」（最小诚实债闭环）；血缘/LLM 独立切片可弃。
+- **Cheapest test**: 拆解顺序（xlsx 先）。
 
 ## What's Well-Reasoned
 
-- Recipe 机制零新风险（M2 实证闭环，管道只是它的消费者）。
-- 版本化推迟到 M3 且最小化（线性版本列表，不做 DAG 图谱）——克制。
-- 质量对比复用 pybridge 跑分，无新引擎面。
-- 开放问题没有假装已有答案（Dagster 深度明示为第一决策）。
+- 范围裁剪有明确价值观（承诺优先、单机价值优先）且推迟项有去向，不是静默砍需求。
+- xlsx 转换路线选"零新契约"而非协议探测——与全项目"复用优先"一致；importing-controller 留作备案。
+- LLM 设计的三个安全阀（默认关/最小发送/人工确认应用）与 DESIGN.md 边界语义对齐。
+- 血缘是纯组装（数据已在），零新风险。
 
 ## What I Couldn't Assess
 
-- 用户对"定时"的真实需求频率（每天一次？分钟级？）——影响调度形态与 daemon 必要性。
-- Dagster 3.14 兼容性（2026 版本矩阵未查证——spike 第一项）。
+- 用户是否真有可用的 OpenAI 兼容端点（影响验收方式——stub 可测但真实体验未验）。
+- 多 sheet xlsx 的真实占比（单 sheet 假设沿用 M1，转换路线下多 sheet 可明确报错）。
 
 ## 净结论
 
-go。切片 0 = Dagster spike（兼容性 + 进程内物化 + 预定 daemon 启停成本探底）；PRD 必须先裁决集成深度（A/B/C），再拆解；拆解保"执行闭环先于调度"。
+go。切片 0 = xlsx 转换全链路实测；LLM 全链路 stub 化；拆解保「xlsx+清扫」为熔断保底。

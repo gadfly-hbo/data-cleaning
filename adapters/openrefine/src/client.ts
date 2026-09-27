@@ -193,7 +193,14 @@ export class OpenRefineClient {
       },
     );
     if (!res.ok) throw new Error(`export-rows failed: HTTP ${res.status}`);
-    return res.text();
+    // 防御：引擎 200+JSON/HTML 错误体不应被当 CSV 使用（M4/Q1，K8）
+    const contentType = res.headers.get("content-type") ?? "";
+    const body = await res.text();
+    const first = body.trimStart()[0];
+    if (/json|html/i.test(contentType) || first === "{" || first === "<") {
+      throw new Error(`export-rows returned non-CSV body: ${body.slice(0, 200)}`);
+    }
+    return body;
   }
 
   async deleteProject(projectId: number): Promise<void> {
@@ -208,6 +215,17 @@ export class OpenRefineClient {
     if (data.code !== "ok") {
       throw new Error(`delete-project bad response: ${JSON.stringify(data).slice(0, 200)}`);
     }
+  }
+
+  /** 全部项目（id+名称）——孤儿清扫的判定数据源（M4/Q2）。 */
+  async listProjectsWithNames(): Promise<Array<{ id: number; name: string }>> {
+    const data = (await this.getJson("/command/core/get-all-project-metadata")) as {
+      projects?: Record<string, { name?: string }>;
+    };
+    return Object.entries(data.projects ?? {}).map(([id, meta]) => ({
+      id: Number(id),
+      name: meta.name ?? "",
+    }));
   }
 
   async listProjectIds(): Promise<number[]> {

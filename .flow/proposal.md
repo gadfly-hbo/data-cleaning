@@ -1,34 +1,43 @@
-# M3 提案 — 清洗管道（Recipe 定版 → 执行 → 调度 → 监控 → 质量对比）
+# M4 提案 — 生产化补课：xlsx 完整支持 + 血缘审计 + LLM 清洗建议（讨论稿固定）
 
-> 来源：M2 flow DONE 后（commit 409469f），用户启动 `/dev-flow 开始 M3`，目标原文：
-> 「清洗管道（Recipe 定版→Dagster 桥→调度→运行监控→清洗前后质量对比）」。
-> 规格上位源：docs/design.md v2（M3 行：Recipe 定版→管道：Dagster 桥、调度、运行监控、清洗前后质量对比；验收=工作台调好的流程能定时跑）。
-> M2 交付基础：Recipe 提取→回放闭环已实证（getOperations/apply-operations 契约测试常驻）；清洗五端点；工作台 UI。
+> 来源：M3 flow DONE 后（commit fd3f8bb），用户启动 `/dev-flow 开始 M4`。
+> 规格上位源：docs/design.md v2（M4 行：多源接入、血缘审计视图、dedupe 实体匹配、LLM 清洗建议 | 生产化）。
+> M3 移交清单（.flow/tasks.md 存档，git fd3f8bb）：xlsx 引擎支持（importing-controller）、执行器 SIGKILL 孤儿、export-rows 罕见边界、createProject 抛错孤儿（已接受）、双实例端口探测、dagster-daemon 评估。
 
-## 背景与既定决策（M3 不可重议，继承 design.md v2 / M0-M2）
+## 范围裁剪（本提案的第一决策，需用户在 diff 门确认）
 
-- 产品模式不变：TS 壳 + adapter 隔离 + pybridge；UI 遵循全局 DESIGN.md；许可证/依赖锁/workspace 纪律。
-- **管道 = Recipe 定版 + 绑定数据源 + 调度**（design.md 原文）；**Recipe ≡ OpenRefine 操作历史 JSON**（M2 实证可移植）。
-- **Dagster（Apache-2.0）为管道编排引擎，经 adapters/pipeline 桥接入**（design.md 目录结构预留）——集成深度是本 flow 的核心开放问题（见下）。
-- **数据不可变/版本化进入产品**（design.md 决策 2 明确"每次清洗/管道运行产出新版本"，M2 时推迟到 M3）：管道产物 = 数据集新版本（快照），原始与产物都以版本形式存在。
-- 清洗前后质量对比 = 同一规则集对 raw 与产物分别跑分（pybridge），报告 diff。
-- 单用户本地产品形态（M1/M2 既定）；M3 不做多用户/RBAC/远程部署。
+design.md 的 M4 是方向篮子，一轮 flow 不可能全量交付且保住质量门槛。**本 flow 裁剪为三件事 + 一组生产化补课**，依据「既有承诺优先于新功能、单机产品价值优先于重集成」：
 
-## M3 目标（本 flow 范围）
+**纳入（本 flow）**：
+1. **xlsx 完整支持**（M1 承诺的诚实债，M3 轮 3 暴露）：推荐方案 = **pybridge 侧 xlsx→csv 转换后进引擎**（原始 xlsx 保留为 raw 版本字节，csv 为引擎工作形态；零新契约、类型经 polars 规范化）——而非探测 importing-controller 两阶段协议（新契约面大、引擎实现复杂度未知，作为备选）。
+2. **血缘审计视图**（design.md M4 原生项，数据已齐）：数据集→管道→运行→版本的溯源链已在 DB，补聚合端点 + 前端视图。
+3. **LLM 清洗建议**（差异化）：对选中列发送**列名 + top 值样本 + 画像摘要**（不含全量数据）到用户自配的 OpenAI 兼容端点，返回建议的清洗操作（GREL/mass-edit JSON），用户确认后经现有 apply 端点应用——**默认关闭、边界常驻声明**（DESIGN.md 语义：数据是否离开本机必须可见）。
+4. **生产化补课**：执行器 SIGKILL 孤儿回收（启动时清扫孤儿临时项目）；dagster-daemon 常驻评估结论记录（预期：单机形态维持方案 B，记录决策依据）；export-rows 罕见边界防御。
 
-设计验收：**工作台调好的清洗流程能定时跑**，且每次运行产出可追溯的版本与前后质量对比。组件：
+**推迟（不在本 flow，记录去向）**：
+- **多源接入（SeaTunnel/DataX）→ M5**：重集成（独立进程、连接器矩阵、调度对齐），与单机文件场景的主线价值距离最远。
+- **dedupe 实体匹配 → M5**（或按用户优先级提前）：compute-clusters 契约探测 + 聚类 UI 是独立特性线。
+- 多用户/RBAC/Docker 分发 → M5+（生产化深水区）。
 
-1. **Pipeline 实体与定版**：从数据集详情页"把当前 Recipe 定版为管道"（绑定该数据集 + 快照操作 JSON）；管道可手动触发。
-2. **管道执行**：Recipe 重放到数据源（引擎建临时项目 → apply-operations → 导出产物快照）+ 前后质量跑分 + 产物版本落盘。执行路径经 Dagster 桥（集成深度待 PRD 决）。
-3. **调度**：管道可配置定时触发（单用户本地量级，形态待 PRD 决）。
-4. **运行监控**：运行记录（状态/耗时/前后报告/产物版本）列表与详情。
-5. **版本化**：数据集版本（最小模型：线性版本列表，不做 DAG 图谱 UI）。
-6. **前端**：管道管理页（创建/列表/运行历史/手动触发）+ 数据集详情的版本列表 + 质量对比视图。
+## 背景与既定决策（M4 不可重议，继承 design.md v2 / M0-M3）
+
+- 产品模式不变：TS 壳 + adapter 隔离 + pybridge；DESIGN.md UI 规范；许可证/依赖锁/workspace 纪律。
+- 数据不可变/版本 append-only/Recipe ≡ 操作历史——全部沿用既有实现。
+- LLM 建议不改变"数据不出本机"的默认承诺：功能默认关闭、明确配置才启用、发送内容最小化且界面常驻声明。
+
+## M4 目标（本 flow 范围）
+
+设计验收（自拟，diff 门确认）：**xlsx 数据集获得与 CSV 等价的完整功能；血缘链路可视化可追溯；LLM 建议可用（配置端点后）且回归可测（stub）；生产化补课项闭环。** 组件：
+
+1. pybridge：xlsx→csv 转换任务（引擎工作形态）；转换语义记录（类型规范化口径）。
+2. studio-api：上传分流改造（xlsx 转换后注册引擎项目；raw 版本仍存 xlsx 原件）；血缘聚合端点；LLM 建议端点（透传用户配置端点，超时/失败结构化）；启动孤儿项目清扫。
+3. studio-web：血缘视图（数据集详情或独立页）；LLM 建议面板（预览建议操作→一键应用，边界声明常驻）；xlsx 数据集功能等价后的 UI 无特判残留清理。
+4. 决策记录：dagster-daemon 维持方案 B 的结论。
 
 ## 开放问题（proposal 未定，留给 PRD/GRILL）
 
-- **Dagster 集成深度**（本 flow 最重要决策）：A. 常驻 dagster-daemon + schedule（完整编排，运维重）；B. 进程内 Dagster job 物化（API 触发，studio-api 自带轻量定时器调度）；C. 完全自研执行（放弃 Dagster）。design.md 选 Dagster 的理由（成熟调度/重试/可观测）在 A 下才完整兑现，但 M3 单用户本地形态下 A 的常驻进程成本高。
-- 调度粒度形态（cron 表达式 vs 间隔分钟数）。
-- 版本模型最小形态（版本号规则、保留策略、是否引用 raw hash）。
-- 管道运行与引擎的并发关系（M1/M2 单引擎实例；管道运行与用户手动操作互斥？）。
-- 质量对比的呈现口径（逐规则 before→after 变化数）。
+- xlsx→csv 转换的类型口径（日期/数字格式化、空值）与列名冲突处理。
+- 血缘视图的信息架构（数据集详情内嵌 vs 独立「血缘」页）。
+- LLM 建议的交互形态（列级建议列表 vs 对话式；建议的置信呈现）。
+- LLM 端点配置方式（env vs 设置页）与模型约定（OpenAI 兼容 chat completions）。
+- 孤儿清扫的判定（引擎项目无对应 dataset 行即扫？时间阈值？）。

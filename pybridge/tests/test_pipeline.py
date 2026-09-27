@@ -62,8 +62,12 @@ def engine():
         os.killpg(proc.pid, signal.SIGKILL)
         pytest.fail("engine did not start")
     yield ENGINE_URL
-    os.killpg(proc.pid, signal.SIGTERM)
-    proc.wait(timeout=15)
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=15)
+    except (PermissionError, ProcessLookupError):
+        # 端口被外部引擎占用时我们的 refine 已退出——清理容错，不掩盖测试结果
+        pass
 
 
 def run_bridge(task: dict, timeout: int = 300) -> tuple[int, dict | str]:

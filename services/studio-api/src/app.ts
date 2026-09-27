@@ -32,9 +32,10 @@ import {
   type PipelineRecord,
 } from "./db.js";
 import { EngineManager } from "./engine-manager.js";
-import { ENGINE_PORT } from "@data-cleaning/adapter-openrefine";
+import { ENGINE_PORT, OpenRefineClient } from "@data-cleaning/adapter-openrefine";
 import { PyBridgeExecutor } from "./pybridge.js";
 import { startScheduler } from "./scheduler.js";
+import { requestSuggestions, resolveLlmConfig, type LlmConfig, type SuggestionColumn } from "./llm.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
@@ -42,6 +43,8 @@ const ALLOWED_EXTENSIONS = new Set([".csv", ".xlsx"]);
 
 export interface AppOptions {
   workspaceDir?: string;
+  /** LLM 建议配置注入（测试）；缺省读 env LLM_BASE_URL/LLM_API_KEY/LLM_MODEL */
+  llm?: Partial<LlmConfig>;
   /** 默认启动管道调度器（30s 扫描）；测试可关 */
   enableScheduler?: boolean;
   /** pybridge 执行器（上传后同步算画像/跑分）；缺省用真实 venv 执行器 */
@@ -87,6 +90,43 @@ export async function buildApp(opts: AppOptions = {}) {
     }
   }
   const engineManager = new EngineManager();
+  const llmConfig = resolveLlmConfig(opts.llm);
+  // 孤儿清扫（M4/Q2，K7）：首次引擎就绪后，删除无 dataset 行引用且 pipeline-temp 前缀的项目
+  engineManager.onFirstReady(() => {
+    void (async () => {
+      // best-effort + 有限重试：引擎忙时首个 fetch 可能被 terminated（实测），重试 3 次退避
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const ok = await (async () => {
+      try {
+        // 与在跑管道运行的并发保护（REVIEW 轮 1 建议 2）：清扫可能删掉在跑 run 的临时项目
+        const busyPipelineIds = new Set(
+          (db.prepare("SELECT DISTINCT pipeline_id FROM pipeline_runs WHERE status = 'running'").all() as Array<{ pipeline_id: number }>).map((r) => r.pipeline_id),
+        );
+        if (busyPipelineIds.size > 0) {
+          console.log("[startup-sweep] skipped: pipelines running（本轮放弃，不重试占用等待）");
+          return true; // 与成功路径一致：无需重试
+        }
+          const client = new OpenRefineClient(ENGINE_PORT);
+          const keep = new Set(
+            (listDatasets(db) as unknown[] as Array<{ project_id: number }>).map((r) => r.project_id),
+          );
+          for (const { id, name } of await client.listProjectsWithNames()) {
+            if (name.startsWith("pipeline-temp") && !keep.has(id)) {
+              await client.deleteProject(id).catch(() => undefined);
+              console.log(`[startup-sweep] removed orphan engine project ${id} (${name})`);
+            }
+          }
+          return true;
+        } catch (err) {
+          console.error(`[startup-sweep] attempt ${attempt} failed:`, err);
+          return false;
+        }
+        })();
+        if (ok) return;
+        await new Promise((r) => setTimeout(r, 2_000 * attempt));
+      }
+    })();
+  });
   const runPybridge = opts.runPybridge ?? ((task: unknown) => new PyBridgeExecutor().run(task));
 
   const app = fastify({ logger: false });
@@ -129,13 +169,17 @@ export async function buildApp(opts: AppOptions = {}) {
     writeFileSync(rawPath, buffer); // 内容寻址：同内容重传复用，不重复落盘
 
     const name = path.basename(safeName, ext);
-    // 引擎的 create-project-from-upload 不支持 xlsx（导入走 importing-controller 两阶段协议，M4 移交）：
-    // xlsx 跳过引擎注册（project_id=0），画像/质量报告照常；预览/清洗等引擎功能返回 422
-    const client = ext === ".xlsx" ? null : await engineManager.ensureEngine();
-    const projectId = client ? await client.createProject(rawPath, name) : 0;
+    // xlsx 全功能（M4/Q1）：引擎 create-project 不吃 xlsx，先转规范 CSV 作为引擎工作形态
+    // （K2 幂等：内容寻址目录下已存在即跳过）；raw 版本仍存 xlsx 原件（不可变字节）
+    const engineFile = ext === ".xlsx" ? path.join(rawDir, "engine.csv") : rawPath;
+    if (ext === ".xlsx" && !existsSync(engineFile)) {
+      await runPybridge({ task: "xlsx_to_csv", src: rawPath, dst: engineFile });
+    }
+    const client = await engineManager.ensureEngine();
+    const projectId = await client.createProject(engineFile, name);
     try {
-      const columns = client ? await client.getColumns(projectId) : [];
-      const rowCount = client ? await client.getRowCount(projectId) : 0;
+      const columns = await client.getColumns(projectId);
+      const rowCount = await client.getRowCount(projectId);
 
       // 画像/跑分先于入库计算：桥失败时抛错、不产生半注册数据集（REVIEW 轮 1 修复）
       const profile = await runPybridge({ task: "profile", file: rawPath });
@@ -159,7 +203,7 @@ export async function buildApp(opts: AppOptions = {}) {
       return reply.code(200).send(toApi(getDataset(db, rec.id)!));
     } catch (err) {
       // 孤儿项目补偿（M2/C1）：入库前任何失败都回收引擎项目，避免 engine-data 累积
-      if (client) await client.deleteProject(projectId).catch((e) => {
+      await client.deleteProject(projectId).catch((e) => {
         req.log.warn(`orphan project ${projectId} reclaim failed: ${String(e)}`);
       });
       throw err;
@@ -181,9 +225,6 @@ export async function buildApp(opts: AppOptions = {}) {
     const { id } = req.params as { id: string };
     const rec = getDataset(db, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
-    if (rec.project_id === 0) {
-      return reply.code(422).send({ error: "xlsx 数据集暂不支持引擎功能（预览/清洗/导出当前态）；画像与质量报告可用，完整 xlsx 支持见 M4" });
-    }
 
     const query = req.query as { offset?: string; limit?: string; version?: string };
     const offset = Math.max(0, Number(query.offset ?? 0) || 0);
@@ -232,9 +273,6 @@ export async function buildApp(opts: AppOptions = {}) {
     const { id } = req.params as { id: string };
     const rec = getDataset(db, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
-    if (rec.project_id === 0) {
-      return reply.code(422).send({ error: "xlsx 数据集暂不支持引擎功能（预览/清洗/导出当前态）；画像与质量报告可用，完整 xlsx 支持见 M4" });
-    }
     const body = req.body as { operations?: unknown[] } | null | undefined;
     if (!body || typeof body !== "object" || !Array.isArray(body.operations) || body.operations.length === 0) {
       return reply.code(400).send({ error: "body must be JSON like {\"operations\": [...]}" });
@@ -248,9 +286,6 @@ export async function buildApp(opts: AppOptions = {}) {
     const { id } = req.params as { id: string };
     const rec = getDataset(db, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
-    if (rec.project_id === 0) {
-      return reply.code(422).send({ error: "xlsx 数据集暂不支持引擎功能（预览/清洗/导出当前态）；画像与质量报告可用，完整 xlsx 支持见 M4" });
-    }
     const client = await engineManager.ensureEngine();
     return client.getHistory(rec.project_id);
   });
@@ -310,9 +345,6 @@ export async function buildApp(opts: AppOptions = {}) {
     const { id } = req.params as { id: string };
     const rec = getDataset(db, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
-    if (rec.project_id === 0) {
-      return reply.code(422).send({ error: "xlsx 数据集暂不支持引擎功能（预览/清洗/导出当前态）；画像与质量报告可用，完整 xlsx 支持见 M4" });
-    }
     const client = await engineManager.ensureEngine();
     const operations = await client.getOperations(rec.project_id);
     return reply
@@ -333,9 +365,13 @@ export async function buildApp(opts: AppOptions = {}) {
       await engineManager.ensureEngine();
 
       const tempOut = path.join(workspace, "versions", String(pipeline.dataset_id), `run-${runId}.csv`);
+      // 管道源用引擎工作形态：xlsx 数据集在内容寻址目录有上传时生成的 engine.csv（K2）
+      const sourceFile = ds.file_path.endsWith(".xlsx")
+        ? path.join(path.dirname(ds.file_path), "engine.csv")
+        : ds.file_path;
       const result = (await runPybridge({
         task: "pipeline",
-        file: ds.file_path,
+        file: sourceFile,
         recipe: pipeline.recipe,
         out_path: tempOut,
         engine_url: `http://127.0.0.1:${ENGINE_PORT}`,
@@ -444,6 +480,91 @@ export async function buildApp(opts: AppOptions = {}) {
     const run = getRun(db, Number(id));
     if (!run) return reply.code(404).send({ error: `run ${id} not found` });
     return toRunApi(run);
+  });
+
+  app.get("/api/datasets/:id/lineage", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = getDataset(db, Number(id));
+    if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
+    ensureRawVersion(db, rec);
+    const versions = listVersions(db, rec.id).map((v) => {
+      if (v.source_run_id === null) {
+        return { version: v.version, kind: v.kind, rows: v.rows, created_at: v.created_at, run: null };
+      }
+      const run = getRun(db, v.source_run_id);
+      if (!run) {
+        return { version: v.version, kind: v.kind, rows: v.rows, created_at: v.created_at, run: null };
+      }
+      const p = getPipeline(db, run.pipeline_id);
+      const sum = (q: unknown) => {
+        if (!q || typeof q !== "object") return null;
+        const rules = (q as { rules?: Array<{ violations?: number }> }).rules;
+        return Array.isArray(rules) ? rules.reduce((acc, r) => acc + (r.violations ?? 0), 0) : null;
+      };
+      return {
+        version: v.version,
+        kind: v.kind,
+        rows: v.rows,
+        created_at: v.created_at,
+        run: {
+          id: run.id,
+          status: run.status,
+          started_at: run.started_at,
+          pipeline: p ? { name: p.name, recipe_steps: Array.isArray(p.recipe) ? p.recipe.length : 0 } : null,
+          quality_summary:
+            run.before_quality && run.after_quality && run.comparison
+              ? {
+                  before_total: sum(run.before_quality),
+                  after_total: sum(run.after_quality),
+                  delta:
+                    (sum(run.after_quality) ?? 0) - (sum(run.before_quality) ?? 0),
+                }
+              : null,
+        },
+      };
+    });
+    return { dataset: { id: rec.id, name: rec.name }, versions };
+  });
+
+  // ===== LLM 清洗建议（M4/Q4）=====
+
+  app.get("/api/llm/status", async () => ({
+    enabled: llmConfig !== null,
+    model: llmConfig?.model ?? null,
+    // 只暴露 host（边界声明用），不暴露 key/路径
+    host: llmConfig ? new URL(llmConfig.baseUrl).host : null,
+  }));
+
+  app.post("/api/datasets/:id/suggest", async (req, reply) => {
+    if (!llmConfig) {
+      return reply.code(200).send({ enabled: false, hint: "未配置：设置环境变量 LLM_BASE_URL 与 LLM_API_KEY（可选 LLM_MODEL）后重启 studio-api" });
+    }
+    const { id } = req.params as { id: string };
+    const rec = getDataset(db, Number(id));
+    if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
+    const body = req.body as { column?: string } | null | undefined;
+    if (!body || typeof body !== "object" || !body.column) {
+      return reply.code(400).send({ error: 'body must be JSON like {"column": "<列名>"}' });
+    }
+    const profileCol = (rec.profile as { columns?: Array<SuggestionColumn & { top_values: Array<{ value: unknown }> }> } | null)
+      ?.columns?.find((c) => c.name === body.column);
+    if (!profileCol) {
+      return reply.code(404).send({ error: `column ${body.column} not in profile` });
+    }
+    const column: SuggestionColumn = {
+      name: profileCol.name,
+      dtype: profileCol.dtype,
+      null_ratio: profileCol.null_ratio ?? 0,
+      top_values: (profileCol.top_values ?? []).map((t: { value: unknown }) => t.value).filter((v) => v !== null && v !== undefined),
+    };
+    try {
+      const suggestions = await requestSuggestions(llmConfig, column);
+      return reply.code(200).send({ enabled: true, suggestions });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const upstream = /abort|fetch failed|HTTP \d+|no message content/.test(message);
+      return reply.code(upstream ? 502 : 422).send({ error: message });
+    }
   });
 
   app.get("/api/datasets/:id/versions", async (req, reply) => {

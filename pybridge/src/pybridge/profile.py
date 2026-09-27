@@ -1,5 +1,7 @@
 """列画像（G7 口径）：类型推断、空值率、基数、数值列分位、字符串列长度、top-k。"""
 
+from datetime import date as _date, datetime as _datetime
+
 import polars as pl
 
 TOP_K = 10
@@ -20,7 +22,12 @@ def dtype_kind(dtype: pl.DataType) -> str:
 
 
 def _jsonify(value) -> object:
-    return value.item() if hasattr(value, "item") else value
+    if hasattr(value, "item"):
+        value = value.item()
+    # polars 日期值经 .item() 得 datetime.date/datetime——JSON 不认，转 ISO（M4/Q1 修复）
+    if isinstance(value, (_date, _datetime)):
+        return value.isoformat()
+    return value
 
 
 def profile_column(series: pl.Series) -> dict:

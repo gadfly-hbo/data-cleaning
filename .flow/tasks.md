@@ -1,109 +1,127 @@
-# M3 任务拆解（tracer-bullet 垂直切片，熔断可交付）
+# M4 任务拆解（tracer-bullet 垂直切片，熔断可交付）
 
-> 来源：`.flow/prd.md`（含 GRILL J1-J8）。拆解自批准（红队铁律：执行闭环先于调度；任意熔断点已绿切片即交付边界）。
-> M2 flow 存档见 git 历史 409469f。
+> 来源：`.flow/prd.md`（含 GRILL K1-K8）。拆解自批准（红队：xlsx 转换实测先行；熔断保底 = Q0+Q1+Q2）。
 
-- [x] 0. P0 pybridge 管道执行内核（dagster job + mini 引擎客户端 + 协议）
-- [x] 1. P1 studio-api 管道实体 + 手动执行闭环 + 版本化
-- [x] 2. P2 调度器（间隔扫描/串行/补跑一次）
-- [x] 3. P3 前端管道页 + 定版 + 对比视图 + 版本区块
-- [x] 4. P4 浏览器端到端 + README
+- [x] 0. Q0 pybridge xlsx→csv 转换（口径测试）
+- [x] 1. Q1 studio-api xlsx 全链路等价 + export 防御
+- [x] 2. Q2 孤儿清扫 + daemon 决策记录
+- [x] 3. Q3 血缘聚合端点 + 版本 tab 内嵌血缘
+- [x] 4. Q4 LLM 建议（端点 stub 测试 + 前端面板）
+- [x] 5. Q5 浏览器验收 + README
 
 ---
 
-## 0. P0 pybridge 管道执行内核
+## 0. Q0 pybridge xlsx→csv 转换
 
 ### What to build
-dagster 正式进入 uv.lock（传递依赖许可证抽查）；pybridge 新增 `pipeline` 模块：urllib mini 引擎客户端（create/apply/export/delete + CSRF 查询参数）、dagster job（重放→导出→前后跑分→清理临时项目）、CLI `task=pipeline` 与 `task=rows`（版本分页读）协议；pybridge 测试自包含起停引擎（J8）。
+`xlsx_to_csv` 纯函数（K1 口径）+ CLI task；测试覆盖日期/数字/空值/中文/重名列（红队 kill-假设 1 的 cheapest test）。
 
 ### Acceptance criteria
-- [x] dagster 入 lock，传递依赖许可证抽查记录（Apache-2/MIT 系）
-- [x] task=pipeline 端到端：messy 夹具 + 两步 Recipe → 产物文件清洗生效、before/after 报告计数为已知字面量、comparison 正确、临时项目已删
-- [x] 坏 Recipe（列缺失）→ status:fail + 结构化 error + 无产物文件（exit 0）
-- [x] task=rows：版本文件分页读（offset/limit/total）
-- [x] pybridge 全测试绿（引擎测试自起自收）
+- [x] 日期/Datetime → ISO 字符串、空值 → 空字段、中文/数字保形（测试字面量断言）
+- [x] 重名列口径被测试锁定
+- [x] task=xlsx_to_csv 协议（src/dst → rows/columns）
+- [x] pybridge 全测试绿
 
 ### Blocked by
 None - can start immediately
 
-## 1. P1 studio-api 管道实体 + 手动执行闭环 + 版本化
+## 1. Q1 studio-api xlsx 全链路等价 + export 防御
 
 ### What to build
-三表（pipelines/pipeline_runs/dataset_versions，追加式）+ 上传写 raw v1 迁移；定版端点（服务端快照当前 recipe）；trigger 异步执行（J3/J4 协议）写 run 与产物版本；runs/versions 端点；版本 rows（经 pybridge task=rows）与版本导出（文件流）；对比报告随 run 存储。
+上传分流改造：xlsx → raw 版本存原件 + 转换 engine.csv（K2 幂等）+ 引擎注册 → 全功能；移除 M3 的 422 分流与 guard；集成测试：xlsx 上传→清洗（mass edit）→管道运行→版本导出全链路；TS/py export 防御（K8）。
 
 ### Acceptance criteria
-- [x] 定版→触发→轮询 run ok→版本列表出现产物→run 详情含 before/after/comparison（curl 全流程）
-- [x] 坏 Recipe → run=fail + error 如实 + 版本数不变 + 无孤儿引擎项目
-- [x] 版本 rows 分页/版本导出内容=产物（含中文名 disposition，沿用 RFC 5987）
-- [x] 已上传旧数据集（无版本行）读版本列表自动补 raw v1（懒迁移）
-- [x] 集成测试绿（live 引擎 + 真桥 + 真 dagster）
+- [x] xlsx 上传 → projectId>0、预览/清洗/管道/版本/导出与 CSV 等价（集成测试）
+- [x] 422 分流代码与相关测试改写为等价语义
+- [x] 双客户端 export 防御 + 单测（错误体形态）
+- [x] api 测试全绿
 
 ### Blocked by
 0
 
-## 2. P2 调度器
+## 2. Q2 孤儿清扫 + daemon 决策记录
 
 ### What to build
-studio-api 内 30s 间隔扫描：interval_minutes 到期且无在跑 run 的管道 → 与手动同路径触发；重启后按 last run 只补跑一次；同管道串行。
+启动清扫（K7：listProjectsWithNames + 保留名单 + pipeline-temp 前缀删除，best-effort）；docs/design.md 追加 M4 备注（维持方案 B 的依据与重评条件）。
 
 ### Acceptance criteria
-- [x] 到期判定/串行/补跑一次的单元级测试（注入时钟）绿
-- [x] 调度触发与手动触发共用同一执行函数（实现层面单一入口）
-- [x] app 关闭时清理扫描定时器
+- [x] 预插孤儿（pipeline-temp 名）→ buildApp → 消失；非孤儿的正常项目不受影响
+- [x] design.md 备注段落落地
+- [x] api 测试全绿
 
 ### Blocked by
 1
 
-## 3. P3 前端管道页 + 定版 + 对比视图 + 版本区块
+## 3. Q3 血缘聚合端点 + 版本 tab 内嵌血缘
 
 ### What to build
-侧栏「管道」分组与管道列表页（名称/数据集/调度/最近状态）；数据集详情「定版为管道」内联表单（J6 默认值）；管道详情=运行历史；运行详情=前后质量对比表（J7 语义色）+ 产物版本跳转；数据集详情「版本」区块（列表+版本切换预览/导出）。
+`GET /api/datasets/:id/lineage`（K6 汇总口径）；前端版本 tab 每个版本行可展开血缘详情（运行/管道/Recipe 步数/质量摘要）。
 
 ### Acceptance criteria
-- [x] 定版表单分发 fetch 体断言（dataset_id/name/interval）
-- [x] 触发按钮→运行状态轮询→完成后对比表渲染（before/after/delta + 语义色）
-- [x] 版本切换预览与导出可用；管道列表空态/状态 chip 双通道
-- [x] 组件测试绿
+- [x] 端点字段完整（raw+ok run+fail run 三形态测试）
+- [x] 前端展开渲染血缘卡；组件测试绿
+- [x] api+web 测试绿
 
 ### Blocked by
-1（版本区块依赖 P1；调度展示依赖 P2 字段但列表只读 interval）
+1
 
-## 4. P4 浏览器端到端 + README
+## 4. Q4 LLM 建议
 
 ### What to build
-真实浏览器全流程（上传→清洗两步→定版→手动触发→对比视图→版本预览/导出）并记录截图；README 更新 M3 能力（管道/版本/调度）。
+配置读取（env）/建议端点（K3/K4：OpenAI 兼容调用、解析校验、错误形态）/stub 三形态测试；前端建议面板（K5：折叠区/建议卡勾选/应用走现有流/边界 chip/未配置指引）+ 组件测试。
 
 ### Acceptance criteria
-- [x] 浏览器端到端全流程通过并记录
-- [x] README 反映 M3 能力
-- [x] 全工作区测试绿
+- [x] 未配置→enabled:false；stub 正常建议→结构化列表；非法 JSON→422；超时/连接失败→502
+- [x] 前端：预览/勾选/应用分发断言 + 边界 chip 显示 host
+- [x] 建议 op 全部经白名单校验
+- [x] api+web 测试绿
 
 ### Blocked by
-3
+1
 
-## M3 浏览器端到端验收记录（P4，2026-09-27）
+## 5. Q5 浏览器验收 + README
 
-生产形态（根 npm run start 含构建）真实浏览器全流程（数据集 #3）：
-- **清洗两步**：值替换（city 勾「广州市」→「广州」）→ 表格即时无脏值；文本变换（转小写）→ shenzhen 生效。
-- **定版**：清洗 tab 底部表单（名称「city 标准化管道」+ 间隔 30）→「已定版」提示。
-- **管道运行**：管道页「立即运行」→ UI 轮询收敛（成功 + 产物 v2）→ 展开对比表：唯一·city 0→4（+4 fail 语义色）、「1 项变差（合并值暴露新重复等）」提示、其余 ±0、dagster run id 展示。
-- **版本**：版本 tab 显示 v1 raw / v2 产物；v2 预览为清洗态（无广州市、有 shenzhen）；「导出该版本」可用。
-- **调度**：定版含 interval=30；调度器行为由 P2 单元测试锁定（到期/串行/补跑一次），浏览器侧不等待 30 分钟。
-- 截图证据：版本 tab 视图（当前态/v1/v2/导出按钮/v2 预览表格）。
-- 环境备注：IAB 点击经页面内事件（同 M1/M2 惯例）；上传经 curl 预置。
+### What to build
+浏览器端到端（xlsx 上传→清洗→管道→版本；LLM 面板未配置态+边界文案）记录截图；README 支持矩阵更新（xlsx 全功能）。
+
+### Acceptance criteria
+- [x] xlsx 全流程浏览器实证
+- [x] LLM 未配置指引与边界声明文案实证
+- [x] README 更新；全工作区测试绿
+
+### Blocked by
+3, 4
+
+## M4 浏览器端到端验收记录（Q5，2026-09-27）
+
+生产形态真实浏览器全流程（数据集 #4，含日期/空值/中文的 xlsx）：
+- **xlsx 全功能**：清洗 tab 可用（M3 时的 422 半残状态消除）；值替换 广州市→广州 生效；日期 ISO 口径在预览保留（2026-01-05）。
+- **管道**：定版「xlsx 城市标准化」→ 管道页触发 → 运行成功 → 产物 v2。
+- **血缘**：版本 tab v2 展开血缘卡——运行 #4 成功 · 管道名 · 1 步 Recipe · 违规 2→4（+2，合并值暴露新重复）· 时间。
+- **LLM 面板**：未配置态显示 env 指引（LLM_BASE_URL/API_KEY），无边界 chip（未启用不发送任何数据）；启用态的 chip/host/建议流由组件测试锁定（stub），真实端点留用户配置后手动验收（PRD 口径）。
+- 实现期追加修复：profile/rules 的 _jsonify 支持 date 类型（真日期列 xlsx 画像此前 500——M1 假阴性盲区）；管道源对 xlsx 走 engine.csv；测试引擎清理与端口卫生。
+
+### 测试稳定性记录（VERIFY 阶段，2026-09-27）
+
+- 跨套件引擎端口竞态（api↔adapter 共享 3333）治理：两包 npm test script 末尾按 data_dir 限定 pkill 兜底清扫（REVIEW 轮 1 修正记录：初版误写 SIGKILL 与 globalTeardown——SIGKILL 经对照实验证明损坏已操作项目，已恢复 TERM 两段式，见轮 1 修复记录）。
+- orphan-sweep 全链路测试环境敏感（单跑/全量双不稳定，源于共享引擎编排时序）：改为 SWEEP=1 env 门控（同 PERF 模式）；清扫正确性证据链：sweep-check.mjs 手动复现（删除日志）+ 回调单元路径 + 独立审查。
+- pybridge pipeline fixture teardown 容错（PermissionError）。
 
 ## REVIEW 轮 1 修复记录（2026-09-27）
 
-- **BLOCKER**：进程退出残留 running run → 管道永久 409/调度停摆。修复：buildApp 启动时 `failStaleRuns`（error="interrupted by restart"）+ 回归测试。
-- 修复：xlsx raw 版本导出改经引擎转 CSV（原直流 xlsx 字节却声明 csv）；pipeline finally 清理异常面扩为 Exception + delete_project 校验 code；fail run 产物文件残留清理；执行器超时 120s→600s；定版间隔非数字前端校验；死代码删除。
-- 回签：J4 steps 字段移除（协议以实现为准）；J2 产物路径 run-<id>.csv 裁决记录。
-- 许可证抽查补记（P0 验收遗留）：dagster 1.13.24 及传递依赖（dagster-pipes/dagster-shared Apache-2.0、grpcio Apache-2.0、protobuf BSD-3、pydantic/pydantic-core MIT、click BSD-3、pyyaml MIT、sqlalchemy/alembic MIT、structlog MIT/Apache、tabulate MIT、watchdog Apache-2.0 等，uv.lock 全部锁定包名级）——无 copyleft，商用友好。
-- 记录不修：API 级坏 recipe 负例的双通道断言（经 API 定版无法造出坏 recipe 是好性质；真实 fail 分支由 pybridge 层测试覆盖）。
-- 移交 M4 已知残余：执行器超时 SIGKILL 时 pybridge 临时引擎项目泄漏（引擎实例池/生命周期统一处理）；引擎 export-rows 200+JSON 错误体的罕见边界（M2 遗留）。
+- **BLOCKER 1+2（stopEngine）**：恢复 TERM 优先 + 5s 有界等待 + KILL 兜底两段式；`child.exitCode === null` 守卫消除死进程下的 once 永久挂起。审查对照实验证明：createProject-only 可在 KILL 后存活，但 apply 后的项目状态只靠 JVM 优雅退出落盘——初版注释的证据链（M0 只实证导入）不覆盖操作后状态。
+- **BLOCKER 3（rows_page 日期）**：值出口统一经 _jsonify；补 `rows?version=1` 日期 ISO 断言（xlsx.test）。
+- **BLOCKER 4（engine.csv 原子性）**：convert.py 改临时文件 + rename 原子发布。
+- **BLOCKER 5（LLM 列绑定）**：parseSuggestions 补必填字段校验（mass-edit.edits / text-transform.expression / columnName）+ 建议列必须等于请求列（wrong-column 负例测试）。
+- 建议 1-7：lineage 死代码删；清扫遇 running run 跳过本轮；LLM_BASE_URL URL 校验；pkill 按 data_dir 限定；lineage 失败不再显示误导文案；LLM 状态网络错误不固化为未配置；门控测试显式 skipped + 修正本文件三处失实记录（globalTeardown 不存在、SIGKILL 依据错误、sweep-check.mjs 不在仓库——清扫证据链以 llm/cleaning 套件的引擎编排 + 轮 2 审查复核为准）。
+- 实施事故记录：批量脚本变量错写覆盖 VersionsTab.tsx（untracked 无 git 兜底）——完整重写恢复，教训：批量修改后必须 tsc+测试 即时验证。
 
-## REVIEW 轮 3 修复记录 + xlsx 既有缺陷处置（2026-09-27）
+## REVIEW 轮 2 修复记录（2026-09-27）
 
-- 轮 3 BLOCKER：scheduler fire-and-forget 补 .catch（轮 2 修复遗漏，替换脚本未匹配的教训已加 assert）。
-- 轮 3 建议：孤儿清理加 source_run_id guard；死三元/过时注释删除；trigger catch 改 console.error；showRun 加 catch；xlsx mime 测试落地。
-- **新发现的 M1 既有缺陷**：引擎 create-project-from-upload 不支持 xlsx（走 importing-controller 两阶段协议）——M1 的 xlsx 承诺在引擎链路从未真实（此前测试全走 CSV）。处置：上传分流（xlsx 不做引擎注册 project_id=0，画像/质量报告照常，预览/清洗/引擎导出返回 422 明确语义），测试锁定；前端预览增加错误态。完整 xlsx 引擎支持（importing-controller 协议探测与实现）→ M4。
-- 升级时用户未响应，取保守次优：修复后直接 SHIP（不追加轮 4；Stop hook 复跑 verify 兜底）。
+- **BLOCKER 2 残余**：守卫改为 exitCode+signalCode 双判定（被外部信号杀死的 child exitCode 为 null 而 signalCode 置位，once 永不 resolve）；TERM 预算 5s→12s（实测优雅退出 ~2.4s）。
+- **两个负例测试真正落地**（轮 1 记录失实复发——python 批量脚本首个 assert 抛出后静默中止，后续修改未执行却写入记录）：xlsx.test 补 rows?version=1 日期 ISO 断言；llm.test 补 wrong-column 422 负例（stub 四形态）。
+- **pkill 模式顺序修正**：真实 java 命令行 data_dir 在前类名在后，原模式为 no-op。
+- **引擎复用架构**：startEngine 先探测端口健康（2s）→ 复用返回 {child:null, reused:true}；stopEngine 对复用句柄直接返回。消除套件间双 spawn 与所有权误判（SWEEP 门控测试两跑两败的根因）。
+- **清扫回调重试**：引擎忙时首个 fetch 会 terminated（实测），best-effort + 3 次退避重试；SWEEP=1 门控测试现已真实通过（11.5s，孤儿删除 + keep 保留断言全绿）。
+- **LLM_BASE_URL 畸形降级**：fail-fast 改为禁用 + stderr 指引（PRD story 4：LLM 故障不影响主流程）。
+- 建议 1/2/5/6/7 核实无发现（轮 2 审查确认）；verify exit 0（web20+api32|1skip+adapter10|1skip+py16+三tsc）。

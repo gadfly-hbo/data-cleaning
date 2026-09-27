@@ -101,5 +101,7 @@ def rows_page(file_path: str, offset: int, limit: int) -> dict:
     total = df.height
     page = df.slice(offset, limit)
     columns = df.columns
-    rows = [list(row) for row in page.iter_rows()]
+    from pybridge.profile import _jsonify  # 日期等非 JSON 原生类型出口（REVIEW 轮 1 BLOCKER 3）
+
+    rows = [[_jsonify(v) for v in row] for row in page.iter_rows()]
     return {"total": total, "offset": offset, "limit": limit, "columns": columns, "rows": rows}

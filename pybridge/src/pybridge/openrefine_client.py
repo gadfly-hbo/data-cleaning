@@ -104,7 +104,13 @@ class OpenRefineMiniClient:
             headers={"content-type": "application/x-www-form-urlencoded"},
         )
         with urllib.request.urlopen(req, timeout=300) as r:
-            return r.read().decode("utf-8")
+            body = r.read().decode("utf-8")
+            ctype = r.headers.get("content-type", "")
+        # 防御：引擎 200+JSON/HTML 错误体不应被当 CSV 使用（M4/Q1，K8）
+        stripped = body.lstrip()
+        if "json" in ctype or "html" in ctype or stripped[:1] in ("{", "<"):
+            raise EngineError(f"export-rows returned non-CSV body: {body[:200]}")
+        return body
 
     def delete_project(self, project_id: int) -> None:
         token = self._csrf()

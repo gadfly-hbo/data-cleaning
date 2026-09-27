@@ -10,6 +10,8 @@
 （M1 启发式：phone/mobile/tel→phone_cn，email/mail→email，url/link→url，date/time→date_iso）。
 """
 
+from datetime import date as _date, datetime as _datetime
+
 import polars as pl
 import pandera.polars as pa
 from pandera.errors import SchemaErrors
@@ -50,7 +52,11 @@ def default_ruleset(columns: list[str]) -> list[dict]:
 
 
 def _jsonify(value) -> object:
-    return value.item() if hasattr(value, "item") else value
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, (_date, _datetime)):
+        return value.isoformat()
+    return value
 
 
 def _pandera_check(df: pl.DataFrame, col: str, schema: pa.DataFrameSchema) -> tuple[int, list[int]]:

@@ -1,93 +1,91 @@
-# PRD — M3：清洗管道（Recipe 定版 → 执行 → 调度 → 监控 → 质量对比）
+# PRD — M4：生产化补课（xlsx 完整支持 + 血缘审计 + LLM 清洗建议）
 
-> 规格事实源：`.flow/proposal.md`（最高优先）。发布方式：无 issue tracker，写入 `.flow/prd.md`。
-> 红队：`.flow/red-team.md`（verdict go；Dagster 深度为第一决策；"执行闭环先于调度"为拆解铁律）。
-> ASSESS spike 事实（2026-09-27，pybridge venv 实测后已还原）：dagster 1.13.24 于 Python 3.14.4 可用（wheel 正常）；进程内 `execute_in_process()` 冷 4.5s（含导入）/热 0.03s；运行自带结构化事件（RUN_START/STEP_SUCCESS/RUN_SUCCESS + run_id）。
+> 规格事实源：`.flow/proposal.md`（最高优先，含范围裁剪决策）。发布方式：无 issue tracker，写入 `.flow/prd.md`。
+> 红队：`.flow/red-team.md`（verdict go；切片 0 = xlsx 转换全链路实测；LLM stub 化；熔断保底 = xlsx+孤儿清扫）。
 
 ## Problem Statement
 
-M2 让业务人员能在工作台手动清洗，但"调好的流程"无法复用：数据更新后要重做一遍同样的操作，也没有定时能力和运行留痕。M3 把 Recipe 变成可定版、可定时、可监控的管道：一键把工作台当前操作历史定版为管道，手动或按间隔自动重放，每次运行产出数据集新版本与清洗前后质量对比。
+三条欠账：① M1 承诺的 XLSX 支持在引擎链路从未真实（M3 轮 3 暴露，现为"画像可用、清洗 422"的半残状态）；② 管道与版本跑起来了，但"这个版本是哪次运行产出、用了什么 Recipe"要查数据库才能回答——血缘不可见；③ 数据清洗平台没有智能辅助，差异化停留在架构层。另有一组生产化小债（孤儿项目、防御边界、daemon 决策记录）。
 
 ## Solution
 
-管道实体（数据集绑定 + Recipe 快照 + 可选间隔调度）。执行路径为 pybridge 内的 Dagster job（进程内物化，直接驱动引擎重放 Recipe → 导出产物 → 前后质量跑分），studio-api 负责定版、触发、调度扫描与运行记录。产物成为数据集新版本，预览/导出与原始数据同构。
+xlsx 经 pybridge 转换为规范 CSV 后进引擎获得全功能（raw 版本仍存 xlsx 原件）；血缘聚合端点 + 前端视图把 数据集→管道→运行→版本 链路可视化；LLM 建议面板对选中列生成可预览、人工确认应用的清洗操作 JSON（用户自配 OpenAI 兼容端点，默认关闭，边界常驻声明）；生产化补课闭环。
 
 ## User Stories
 
 业务分析人员（最终用户）：
 
-1. 作为业务分析人员，我要在数据集详情页把当前清洗操作历史一键定版为管道（命名），以便复用这套清洗流程。
-2. 作为业务分析人员，我要看到管道列表（名称/绑定数据集/调度/最近运行状态），以便管理我的管道。
-3. 作为业务分析人员，我要能手动触发一次管道运行并看到进行中/成功/失败状态。
-4. 作为业务分析人员，我要看到运行历史（每次的状态/耗时/错误信息），以便知道管道是否健康。
-5. 作为业务分析人员，我要看到某次运行的清洗前后质量对比（逐规则违规数 before→after 与变化），以便量化清洗价值。
-6. 作为业务分析人员，管道产物要成为数据集的新版本，可预览、可导出——与原始数据同一套体验。
-7. 作为业务分析人员，我要看到数据集的版本列表（raw 与各次管道产物，按时间），以便追溯每次产物来源。
-8. 作为业务分析人员，我要能给管道配置定时间隔（分钟），到点自动运行。
-9. 作为业务分析人员，源数据变化导致 Recipe 半途失败时，运行要如实记为失败且不产生半成品版本。
+1. 作为业务分析人员，我要上传 XLSX 并获得与 CSV 完全等价的功能（预览/清洗/管道/版本/导出），以便不必先手工转格式。
+2. 作为业务分析人员，我要在数据集详情看到血缘视图（版本来自哪次运行、运行属于哪条管道、Recipe 步骤数、前后质量摘要），以便回答"这个数据从哪来、被怎么处理过"。
+3. 作为业务分析人员，配置了 LLM 端点后，我要对选中列请求清洗建议，看到建议的操作预览（GREL/替换映射），确认后一键应用，以便不知道 GREL 语法也能做复杂清洗。
+4. 作为业务分析人员，LLM 功能未配置/失败时要得到明确状态与指引，数据与流程不受影响。
+5. 作为业务分析人员，界面要常驻声明 LLM 启用时"列名与样本值会发送到你所配置的服务"，以便知情掌控数据边界。
 
 平台开发者（我方）：
 
-10. 作为平台开发者，管道执行要以 Dagster job 形态运行并消费其结构化运行事件（run_id/步骤成败），以便执行语义与重试原语有工业级底座。
-11. 作为平台开发者，手动触发与调度触发必须共用同一条执行路径（curl 可触发全流程），以便行为一致可测。
-12. 作为平台开发者，数据集版本表结构要从一开始就不可变追加（append-only），以便血缘审计有据。
+6. 作为平台开发者，xlsx→csv 转换的类型口径要有测试锁定（日期 ISO 化、数字保形、空值、中文），转换后全链路等价性由集成测试保证。
+7. 作为平台开发者，studio-api 启动时清扫孤儿引擎项目（无 dataset 行引用的项目），执行器 SIGKILL 泄漏不再累积。
+8. 作为平台开发者，LLM 建议端点要可 stub 测试（不依赖真实密钥），输出经 JSON 校验，失败结构化。
+9. 作为平台开发者，dagster-daemon 维持方案 B 的决策要有记录（结论+依据），后续生产化再评估有据可查。
+10. 作为平台开发者，export-rows 罕见边界（200+JSON 错误体）在双客户端有防御（检测非 CSV 输出即抛错）。
 
 ## Implementation Decisions
 
-- **Dagster 集成深度 = 方案 B（本 PRD 第一决策，经 spike 实证）**：管道 job 以 dagster 定义、`execute_in_process()` 进程内物化；**不引入 dagster-daemon/dagit 常驻进程**——调度由 studio-api 内置间隔扫描承担，daemon 常驻推迟到多用户/生产化阶段（M4）再评估。这是 design.md v2"Dagster 桥"的执行深度细化（非选型更换），偏差记录在案。
-- **adapters/pipeline 的落地形态**：pybridge 内新增 `pipeline` 模块（dagster job 定义 + 引擎直连）。管道执行步骤：建临时引擎项目（直连 127.0.0.1:3333，引擎由 studio-api 惰性托管）→ apply Recipe → 导出产物到 workspace → 进程内 pybridge 跑分（before=源文件, after=产物）→ 输出结构化结果 JSON。studio-api 经一次性子进程调用（同 M1 桥模式）。
-- **数据模型（SQLite 追加式）**：
-  - `pipelines(id, dataset_id, name, recipe_json, interval_minutes NULL, created_at)`
-  - `pipeline_runs(id, pipeline_id, status running|ok|fail, dagster_run_id, started_at, finished_at NULL, error NULL, before_quality_json, after_quality_json, output_version_id NULL)`
-  - `dataset_versions(id, dataset_id, version, kind raw|pipeline, file_path, source_run_id NULL, rows, created_at)`；上传时写 raw 版 v1；管道产物追加新版本号。
-- **API 端点**：`POST /api/pipelines`（定版：dataset_id+name+interval?，服务端快照当前 recipe）、`GET /api/pipelines`（含最近运行态）、`POST /api/pipelines/:id/trigger`、`GET /api/pipelines/:id/runs`、`GET /api/runs/:id`（含前后报告与产物版本）、`GET /api/datasets/:id/versions`；产物版本的预览/导出复用现有 rows/export 端点（按 version 查询参数路由到对应文件）。
-- **调度器**：studio-api 内每 30s 扫描 `interval_minutes` 到期的管道并触发；同一管道串行（前一运行未结束不重复触发）；进程重启后按 last run 时间重算（不补偿错过的多次，只补跑一次）。
-- **质量对比口径**：默认规则集（G8）分别对源文件与产物跑分，逐规则输出 `{kind, column, before, after, delta}`，汇总违规总数变化。
-- **引擎并发**：管道运行使用独立临时引擎项目，与用户手动工作台操作天然隔离（引擎按项目隔离）；运行结束删除临时项目（复用 M2 孤儿回收路径）。
-- **前端**：侧栏新增「管道」分组（管道列表页：创建入口在数据集详情「定版为管道」对话框式内联表单）；管道详情=运行历史列表；运行详情=前后质量对比表（语义色标注改善/恶化）+ 产物版本跳转；数据集详情新增「版本」区块（版本列表，点击切换预览）。
+- **xlsx 路线（proposal 已定）**：pybridge 新增 `xlsx_to_csv` 纯函数（polars 读→规范化写 CSV）；studio-api 上传 xlsx 时：raw 版本存 xlsx 原件（不可变字节），转换产物存 `workspace/datasets/<hash>/engine.csv`，引擎项目以该 CSV 注册——xlsx 从此全功能。类型口径：日期/Datetime → ISO-8601 字符串；空值 → 空字段；多 sheet → 明确 422（仅首 sheet，沿用 M1 约定）。M3 的 xlsx 422 分流与前端特判全部移除。
+- **血缘聚合端点**：`GET /api/datasets/:id/lineage` → `{versions:[{version,kind,rows,created_at,run?{id,status,pipeline{name},started_at,recipe_steps,quality_summary{before_total,after_total,delta}}}]}`（一次组装，无新表）。
+- **血缘视图**：详情页「版本」tab 内嵌升级——每个 pipeline 版本行展开运行/管道/Recipe 步数/质量摘要；不建独立页（信息与版本天然同源）。
+- **LLM 建议**：
+  - 配置：`LLM_BASE_URL` + `LLM_API_KEY`（env，studio-api 启动读取）；未配置 → 建议端点返回 `{enabled:false}`，前端显示配置指引。
+  - 请求：OpenAI 兼容 `POST {base}/chat/completions`（模型 `LLM_MODEL`，默认 `gpt-4o-mini`）；payload 仅含列名、dtype、画像摘要、top 值（≤8 个）；system prompt 约定只回 JSON 数组（mass-edit/text-transform 操作）。
+  - 响应：TS 侧 JSON 解析+结构校验（op 白名单）；非法 → 422 结构化（含原始文本片段）；合法建议经**现有** `POST /operations` 应用（用户在 UI 预览每条建议并勾选）。
+  - 边界：建议面板常驻 chip「启用中：列名与样本值将发送到 <host>」；请求/响应不落盘。
+- **孤儿清扫**：studio-api 启动时（failStaleRuns 之后）list engine projects → 无对应 datasets 行引用且名称为 `pipeline-temp` 前缀的项目 → deleteProject；失败仅记日志。
+- **export-rows 防御**：TS/py 两客户端检测响应 content-type 或首字符 `{`/`<` 即抛结构化错误（不再把错误体当 CSV）。
+- **daemon 决策记录**：`docs/design.md` 追加 M4 备注段（维持方案 B 的依据：单用户本地、无常驻运维、调度精度需求低；触发重评条件：多用户/远程部署/秒级调度）。
 
 ## Testing Decisions
 
-- 只测外部行为；seam 扩展：pybridge 新增 `pipeline` 任务的 CLI 协议 seam + studio-api 管道端点 HTTP seam。
-- pybridge：`task=pipeline` 端到端测试（临时引擎项目 + messy 夹具 + 两步 Recipe → 产物文件内容断言清洗生效 + before/after 报告计数为已知字面量）；源数据列缺失 → 结构化失败、无产物文件。
-- studio-api：定版→触发→轮询运行态 ok→版本列表出现产物→对比报告字段完整；坏 Recipe → run=fail + error 如实 + 版本数不变；调度扫描函数的单元级测试（到期判定/串行约束，注入时钟）。
-- studio-web：管道列表/运行对比组件测试（fetch 边界）；定版表单分发断言。
-- 浏览器手动端到端（定版→触发→对比→版本预览）记录进 tasks.md。
+- 只测外部行为；seam：pybridge `xlsx_to_csv`（CLI 协议）、studio-api 血缘/建议端点（HTTP）、前端组件（fetch 边界）。
+- xlsx 等价：构造覆盖 日期/数字/空值/中文/公式值（calamine 读值） 的 xlsx 夹具 → 转换断言 → 上传 → 清洗（mass edit）→ 管道运行 → 版本导出，全链路集成测试。
+- 血缘端点：造 raw+两次 pipeline run（一 ok 一 fail）→ 断言链路字段完整。
+- LLM：stub `LLM_BASE_URL`（本地 http stub 返回固定建议 JSON/非法 JSON/超时三形态）→ 建议端点行为锁定；前端建议面板组件测试（预览/勾选/应用分发）。
+- 孤儿清扫：预插孤儿项目（直接 engine client 建）→ buildApp → 项目消失。
+- 浏览器手动端到端（xlsx 上传→清洗→管道；LLM 面板边界文案）记录进 tasks.md。
 
 ## Out of Scope
 
-- dagster-daemon/dagit 常驻与远程运行器（M4 生产化评估）；cron 表达式调度（M4，M3 仅间隔分钟）。
-- 版本 DAG 图谱 UI（M3 仅线性列表）；版本保留策略/清理。
-- 多用户、RBAC、通知/告警通道；失败自动重试策略配置（M3 失败即如实记录）。
-- 管道编辑器（改已定版 Recipe——重新定版即可）；跨数据集管道。
+- 多源接入（SeaTunnel/DataX）→ M5；dedupe 实体匹配 → M5；多用户/RBAC/Docker 分发 → M5+。
+- LLM 对话式交互/多轮上下文/自动执行建议（永远人工确认）；LLM 服务代理或内置密钥。
+- xlsx 多 sheet/样式/公式重算（读值不读式，沿用 calamine）。
+- 版本保留策略/清理（append-only 沿用）。
 
 ## Further Notes
 
-- 熔断保底切片 = 「定版 + 手动触发执行 + 版本产物 + 对比视图」（无调度）；调度切片独立在后。
-- dagster 冷启动 4.5s 对管道运行无感（异步运行态轮询）；pybridge 的 dagster 依赖进入 uv.lock（~90 传递依赖，许可证均为 Apache-2/MIT 系，逐项抽查在切片内完成）。
+- 熔断保底 =「xlsx 等价 + 孤儿清扫 + export 防御」；血缘与 LLM 为独立可弃切片。
+- LLM 真实端点体验不在自动化验收内（无密钥环境），以 stub 锁行为 + 用户配置后手动验收为口径，如实记录。
 
 ## GRILL 决议（自答，2026-09-27）
 
-零升级（全部实现细节级，有可辩护推荐）：
+零升级（实现细节级）：
 
-- **J1 pybridge 侧引擎客户端**：urllib 零依赖 mini client（create/apply/export/delete 四端点 + CSRF 查询参数），契约由 pybridge 端到端测试钉住；与 TS client 的双语言漂移风险由"两份契约测试钉同一引擎契约文档"缓解（契约文档是单一事实源）。
-- **J2 产物路径**：`workspace/versions/<dataset_id>/` 下追加。原定 v<n>.csv，实现为 **run-<runId>.csv**（REVIEW 轮 1 回签：runId 天然唯一，规避并发版本号覆盖；DB 层仍按 MAX(version)+1 赋版本号，UNIQUE 兜底）；不做内容寻址（同内容也是新版本，append-only 语义）。
-- **J3 触发异步模型**：POST trigger 立即返回 run id（status=running）；studio-api fire-and-forget spawn pybridge，完成回写 run/版本；调度与手动共用此路径。
-- **J4 pipeline 任务协议**：stdin `{task:"pipeline", file, recipe, out_path, engine_url}` → stdout `{status:"ok"|"fail", dagster_run_id, output_file?, rows?, quality?:{before,after,comparison}, error?}`；业务失败（Recipe 失败）= exit 0 + status:fail，仅执行异常才非零退出（studio-api 据此区分 run 状态与桥故障）。【REVIEW 轮 1 回签：原草案的 steps 字段无消费方，协议以实现为准移除】
-- **J5 版本预览与导出**：版本 rows 不进引擎——pybridge 新增 `task=rows`（polars 分页读版本文件）；版本导出直接文件流（sendFile，零解析）。工作台实时预览仍走引擎（现状不变）。
-- **J6 定版表单默认值**：名称 `<dataset名>-pipeline`；interval 可空=仅手动。
-- **J7 对比表 UI**：行=规则（kind+column），列=before/after/delta；delta<0 改善用 ok 色、>0 恶化用 fail 色、=0 中性；顶部汇总违规总数变化。
-- **J8 pybridge 引擎测试自包含**：pipeline 端到端测试自行 spawn/回收引擎（复刻 engine.ts 逻辑 ~20 行），与 TS 契约测试行为同款。
+- **K1 转换口径实现**：pl.read_excel 首 sheet 原始读取（不经 loader.normalize——转换保留原值语义，trim 是画像/跑分层的事）；Date→`%Y-%m-%d`、Datetime→ISO 字符串、其余类型 polars 默认序列化；重名列按 polars 自动后缀口径（测试钉住）。
+- **K2 engine.csv 幂等**：内容寻址目录下已存在即跳过转换（同 xlsx 重传零成本）。
+- **K3 LLM prompt 与解析**：system 约定"只输出 JSON 数组，元素为 core/mass-edit 或 core/text-transform 操作对象"+两个 few-shot；解析剥 ```json 围栏 → JSON.parse → op 白名单/必填字段校验；围栏外文本/非法 JSON → 422（附原始片段前 200 字）。
+- **K4 LLM 错误形态**：未配置→{enabled:false}（200）；上游连接失败/超时（30s）→502 结构化；建议非法→422。请求响应不落盘、不打日志（样本值可能敏感）。
+- **K5 建议面板位置**：清洗 tab 操作面板下方折叠区「AI 清洗建议」：选列→请求→建议卡（类型/参数预览/勾选）→「应用所选」走现有 apply 流（复用 busy/错误/历史刷新）。未配置显示配置指引（env 变量名）。
+- **K6 quality_summary 计算**：run 的 before/after 报告 sum(violations)；fail run 无报告 → null。
+- **K7 孤儿清扫数据源**：TS client 新增 listProjectsWithNames()（get-all-project-metadata 组装）；保留名单=datasets 全部 project_id；删除对象=名字 pipeline-temp 前缀且不在保留名单。
+- **K8 export 防御实现**：TS：content-type 含 json/html 或响应体首字符 `{`/`<` → throw；py 同理（openrefine_client.export_rows_csv）。
 
 ## PRD 相对 proposal 的新增/变更（diff gate 清单）
 
-全部 **additive**（裁决开放问题/落地细节），其中第 1 条是对 design.md 执行深度的明示细化（非 proposal 决策更改）：
+全部 **additive**（裁决开放问题/细化），无对 proposal 决策的更改或删除：
 
-1. **Dagster 集成深度裁决为 B**：进程内物化 + studio-api 内置间隔调度；不引入 daemon/dagit（spike 实证支撑；daemon 常驻 M4 再评估）。
-2. 执行编排在 pybridge 侧 dagster job（直连引擎 3333；studio-api 只管定版/触发/调度/记录）——adapters/pipeline 的具体落地形态。
-3. 调度形态：间隔分钟数 + 30s 扫描 + 同管道串行 + 重启只补跑一次（cron/补偿策略 M4）。
-4. 版本模型最小形态：dataset_versions 线性追加（kind raw|pipeline），无 DAG UI、无保留策略。
-5. 质量对比口径：默认规则集逐规则 before/after/delta + 汇总。
-6. API 端点七个定型；产物预览/导出经 version 参数复用现有端点。
-7. 引擎并发模型：管道用独立临时项目（与手动操作天然隔离），结束即删。
-8. 前端形态：侧栏「管道」分组 + 定版内联表单 + 运行对比表 + 数据集版本区块。
+1. xlsx 类型口径定型：日期 ISO 化、空值空字段、多 sheet 明确 422、公式读值不读式；引擎工作文件为 `datasets/<hash>/engine.csv`。
+2. 血缘视图裁决：版本 tab 内嵌升级（不建独立页）；血缘端点响应形态定型。
+3. LLM 配置定型：env 三变量（BASE_URL/API_KEY/MODEL 默认 gpt-4o-mini）、chat completions 协议、未配置返回 enabled:false；建议经现有 operations 端点应用（无新执行面）。
+4. LLM 安全阀细化：payload 最小化（列名/dtype/摘要/top≤8）、输出 op 白名单校验、不落盘、边界 chip 显示 host。
+5. 孤儿清扫定型：启动时按"无 dataset 行引用 + pipeline-temp 前缀"判定，best-effort 删除。
+6. export-rows 防御：双客户端 content-type/首字符检测。
+7. daemon 决策：docs/design.md 追加备注段（触发重评条件写明）。
+8. M3 的 xlsx 422 分流代码与前端特判全部移除（等价后无残留）。

@@ -223,6 +223,52 @@ export async function getRun(id: number): Promise<PipelineRun> {
   return json<PipelineRun>(await fetch(`/api/runs/${id}`));
 }
 
+export interface LineageRun {
+  id: number;
+  status: "running" | "ok" | "fail";
+  started_at: string;
+  pipeline: { name: string; recipe_steps: number } | null;
+  quality_summary: { before_total: number; after_total: number; delta: number } | null;
+}
+
+export interface LineageVersion {
+  version: number;
+  kind: "raw" | "pipeline";
+  rows: number;
+  created_at: string;
+  run: LineageRun | null;
+}
+
+export async function getLineage(datasetId: number): Promise<LineageVersion[]> {
+  const data = await json<{ versions: LineageVersion[] }>(
+    await fetch(`/api/datasets/${datasetId}/lineage`),
+  );
+  return data.versions;
+}
+
+export interface LlmStatus {
+  enabled: boolean;
+  model: string | null;
+  host: string | null;
+}
+
+export async function getLlmStatus(): Promise<LlmStatus & { hint?: string }> {
+  return json<LlmStatus & { hint?: string }>(await fetch("/api/llm/status"));
+}
+
+export async function suggestColumn(
+  datasetId: number,
+  column: string,
+): Promise<{ enabled: boolean; suggestions?: unknown[]; hint?: string }> {
+  return json<{ enabled: boolean; suggestions?: unknown[]; hint?: string }>(
+    await fetch(`/api/datasets/${datasetId}/suggest`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column }),
+    }),
+  );
+}
+
 export async function listVersions(datasetId: number): Promise<DatasetVersion[]> {
   const data = await json<{ versions: DatasetVersion[] }>(
     await fetch(`/api/datasets/${datasetId}/versions`),

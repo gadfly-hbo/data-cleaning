@@ -28,8 +28,11 @@ const OPENREFINE_TARBALL = `openrefine-linux-${ENGINE_VERSION}.tar.gz`;
 const OPENREFINE_URL = `https://github.com/OpenRefine/OpenRefine/releases/download/${ENGINE_VERSION}/${OPENREFINE_TARBALL}`;
 
 export interface EngineHandle {
-  child: ChildProcess;
+  /** 复用外部已健康引擎时为 null（我们未持有进程句柄，stop 不做回收） */
+  child: ChildProcess | null;
   port: number;
+  /** true = 端口上已有健康引擎，直接复用（REVIEW 轮 2：消除双 spawn 与误判所有权） */
+  reused: boolean;
 }
 
 function findJreHome(): string {
@@ -56,6 +59,14 @@ export function ensureInstalled(): void {
 
 export async function startEngine(): Promise<EngineHandle> {
   ensureInstalled();
+  // 先探测复用：端口上已有健康引擎（如上一测试套件或外部进程遗留）直接复用，
+  // 不再 spawn（spawn 会绑定失败退出，且让我们误持有"所有权"导致 stop 误杀/误查端口）
+  try {
+    await waitHealthy(ENGINE_PORT, 2_000);
+    return { child: null, port: ENGINE_PORT, reused: true };
+  } catch {
+    // 端口无健康引擎——走正常启动
+  }
   const jreHome = findJreHome();
   const log = createWriteStream(ENGINE_LOG, { flags: "a" });
   log.write(`\n===== engine start ${new Date().toISOString()} =====\n`);
@@ -85,7 +96,7 @@ export async function startEngine(): Promise<EngineHandle> {
     killGroup(child, "SIGKILL");
     throw err;
   }
-  return { child, port: ENGINE_PORT };
+  return { child, port: ENGINE_PORT, reused: false };
 }
 
 function killGroup(child: ChildProcess, sig: NodeJS.Signals): void {
@@ -98,12 +109,23 @@ function killGroup(child: ChildProcess, sig: NodeJS.Signals): void {
 
 export async function stopEngine(engine: EngineHandle): Promise<void> {
   const { child, port } = engine;
-  killGroup(child, "SIGTERM");
-  const exited = await Promise.race([
-    once(child, "exit").then(() => true),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 15_000)),
-  ]);
-  if (!exited) killGroup(child, "SIGKILL");
+  if (child === null) {
+    return; // 复用的外部引擎：非我们所有，不杀不查端口（REVIEW 轮 2）
+  }
+  // 两段式（REVIEW 轮 1 修复）：操作后的项目状态只靠 JVM 优雅退出落盘（TERM 对照实验证明
+  // KILL 会损坏已应用操作的项目），TERM 优先 + 有界等待；child 已死亡时（外部崩溃/被杀）
+  // exit 事件已发过、once 永不 resolve——用 exitCode+signalCode 双守卫（REVIEW 轮 2）
+  if (child.exitCode === null && child.signalCode === null) {
+    killGroup(child, "SIGTERM");
+    const exited = await Promise.race([
+      once(child, "exit").then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 12_000)),
+    ]);
+    if (!exited && child.exitCode === null && child.signalCode === null) {
+      killGroup(child, "SIGKILL");
+      await once(child, "exit").catch(() => undefined);
+    }
+  }
 
   const closed = await waitPortClosed(port, 15_000);
   if (!closed) throw new Error(`engine port ${port} still open after stop`);

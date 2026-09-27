@@ -148,8 +148,28 @@ test("create pipeline from live recipe → trigger → run ok → version + comp
   expect(mine?.last_run?.status).toBe("ok");
 });
 
-test("xlsx dataset: profile works, engine features 422, raw version export streams original bytes", async () => {
-  // 引擎 create-project 不支持 xlsx（REVIEW 轮 3 发现的 M1 既有缺陷）：分流语义锁定
+test("lineage endpoint links versions to runs and pipelines", async () => {
+  const data = (await (await fetch(`${baseUrl}/api/datasets/${datasetId}/lineage`)).json()) as {
+    dataset: { name: string };
+    versions: Array<{
+      version: number; kind: string; run: null | {
+        id: number; status: string;
+        pipeline: { name: string; recipe_steps: number } | null;
+        quality_summary: { before_total: number; after_total: number; delta: number } | null;
+      };
+    }>;
+  };
+  expect(data.dataset.name).toBe("messy-small");
+  expect(data.versions.length).toBe(2);
+  const raw = data.versions.find((v) => v.kind === "raw");
+  expect(raw?.run).toBeNull();
+  const artifact = data.versions.find((v) => v.kind === "pipeline");
+  expect(artifact?.run?.status).toBe("ok");
+  expect(artifact?.run?.pipeline?.recipe_steps).toBe(2);
+  expect(artifact?.run?.quality_summary?.delta).toBeGreaterThanOrEqual(0); // 合并值暴露新重复的口径（before 0 → after 4）
+});
+
+test("xlsx dataset: full engine parity since M4 (conversion route)", async () => {
   const { execFileSync } = await import("node:child_process");
   const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
   const tmpXlsx = path.join(WORKSPACE, "fixture-messy.xlsx");
@@ -163,23 +183,16 @@ test("xlsx dataset: profile works, engine features 422, raw version export strea
   form.append("file", new File([readFileSync(tmpXlsx)], "messy.xlsx"));
   const res = await fetch(`${baseUrl}/api/datasets`, { method: "POST", body: form });
   expect(res.status).toBe(200);
-  const ds = (await res.json()) as { id: number; profile: { row_count: number } | null; projectId: number };
-  expect(ds.projectId).toBe(0); // 未做引擎注册
-  expect(ds.profile?.row_count).toBe(10); // 画像照常（pybridge 读 xlsx）
+  const ds = (await res.json()) as { id: number; projectId: number; rows: number };
+  expect(ds.projectId).toBeGreaterThan(0); // 引擎注册（转换路线，M4）
+  expect(ds.rows).toBe(10);
 
-  const rowsRes = await fetch(`${baseUrl}/api/datasets/${ds.id}/rows`);
-  expect(rowsRes.status).toBe(422); // 引擎功能明确不支持
-
-  const versions = (await (await fetch(`${baseUrl}/api/datasets/${ds.id}/versions`)).json()) as {
-    versions: Array<{ version: number; kind: string }>;
+  // 预览可用（引擎态，经转换后的 CSV）
+  const rows = (await (await fetch(`${baseUrl}/api/datasets/${ds.id}/rows?offset=0&limit=2`)).json()) as {
+    total: number; rows: unknown[][];
   };
-  expect(versions.versions.length).toBe(1);
-
-  const exportRes = await fetch(`${baseUrl}/api/datasets/${ds.id}/export?version=1`);
-  expect(exportRes.status).toBe(200);
-  expect(exportRes.headers.get("content-type")).toContain("spreadsheetml");
-  const bytes = new Uint8Array(await exportRes.arrayBuffer());
-  expect(bytes[0]).toBe(0x50); // 'P' of PK zip header——原文件字节直传
+  expect(rows.total).toBe(10);
+  expect(rows.rows[0]?.[0]).toBe("张伟");
 });
 
 test("pipeline with broken recipe fails cleanly: run=fail, no new version", async () => {

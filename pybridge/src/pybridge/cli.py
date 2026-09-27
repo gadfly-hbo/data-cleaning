@@ -5,11 +5,13 @@
 - rules：内置/自定义规则集跑分（G8 口径）
 - pipeline：管道执行（M3，dagster 进程内物化；业务失败 status:fail + exit 0，J4）
 - rows：文件分页读（M3 版本预览，J5）
+- xlsx_to_csv：xlsx 引擎工作形态转换（M4/Q0，K1 口径）
 """
 
 import json
 import sys
 
+from pybridge.convert import xlsx_to_csv
 from pybridge.loader import load_frame
 from pybridge.pipeline import run_pipeline, rows_page
 from pybridge.profile import profile
@@ -28,6 +30,8 @@ def main() -> None:
             result = run_pipeline(task)
         elif kind == "rows":
             result = rows_page(task["file"], int(task.get("offset", 0)), int(task.get("limit", 50)))
+        elif kind == "xlsx_to_csv":
+            result = xlsx_to_csv(task["src"], task["dst"])
         else:
             raise ValueError(f"unknown task: {kind!r}")
         json.dump(result, sys.stdout, ensure_ascii=False)

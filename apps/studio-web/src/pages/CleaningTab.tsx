@@ -8,6 +8,8 @@ import { useEffect, useMemo, useState } from "react";
 import {
   applyOperations,
   createPipeline,
+  getLlmStatus,
+  suggestColumn,
   downloadRecipe,
   exportCsv,
   getHistory,
@@ -38,6 +40,11 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
   const [promoteInterval, setPromoteInterval] = useState("");
   const [promoted, setPromoted] = useState<string | null>(null);
   const [promoteError, setPromoteError] = useState<string | null>(null);
+  const [llmStatus, setLlmStatus] = useState<{ enabled: boolean; model: string | null; host: string | null } | null>(null);
+  const [llmSuggestions, setLlmSuggestions] = useState<unknown[] | null>(null);
+  const [llmChecked, setLlmChecked] = useState<Record<number, boolean>>({});
+  const [llmBusy, setLlmBusy] = useState(false);
+  const [llmError, setLlmError] = useState<string | null>(null);
 
   // 操作面板状态
   const [column, setColumn] = useState("");
@@ -64,6 +71,12 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
       .then(setHistory)
       .catch(() => setHistory(null));
   }, [dataset.id]);
+
+  useEffect(() => {
+    getLlmStatus()
+      .then(setLlmStatus)
+      .catch(() => setLlmStatus(null)); // 网络错误保持"未知"，不固化成"未配置"
+  }, []);
 
   useEffect(() => {
     if (!column && stringColumns.length > 0) setColumn(stringColumns[0]!);
@@ -129,6 +142,35 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
     await guarded(async () => {
       await applyOperations(dataset.id, operations);
       resetForm(); // 操作已生效才清表单
+    });
+  }
+
+  async function fetchSuggestions() {
+    setLlmBusy(true);
+    setLlmError(null);
+    setLlmSuggestions(null);
+    setLlmChecked({});
+    try {
+      const res = await suggestColumn(dataset.id, column);
+      if (!res.enabled) {
+        setLlmError("LLM 已被禁用（配置可能已变更）");
+        return;
+      }
+      setLlmSuggestions(res.suggestions ?? []);
+    } catch (err) {
+      setLlmError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLlmBusy(false);
+    }
+  }
+
+  async function applySuggestions() {
+    const selected = (llmSuggestions ?? []).filter((_, i) => llmChecked[i]);
+    if (selected.length === 0) return;
+    await guarded(async () => {
+      await applyOperations(dataset.id, selected);
+      setLlmSuggestions(null);
+      setLlmChecked({});
     });
   }
 
@@ -355,6 +397,80 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
             {[...history.past].reverse().map((e, i, arr) => (
               <HistoryRow key={e.id} entry={e} state={i === 0 ? "latest" : "past"} busy={busy} onClick={() => void restore(e.id)} />
             ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card p-3.5" data-testid="llm-panel">
+        <div className="flex items-center gap-2 flex-wrap mb-2.5">
+          <span className="font-semibold">AI 清洗建议</span>
+          {llmStatus?.enabled ? (
+            <span className="chip chip-accent" data-testid="llm-boundary">
+              启用中：列名与样本值将发送到 {llmStatus.host}（{llmStatus.model}）
+            </span>
+          ) : (
+            <span className="chip bg-surface-2 text-text-2 border-border">未配置</span>
+          )}
+          {llmStatus?.enabled && (
+            <button
+              type="button"
+              className="btn-secondary ml-auto"
+              disabled={busy || llmBusy}
+              onClick={() => void fetchSuggestions()}
+              data-testid="llm-fetch"
+            >
+              {llmBusy ? "请求中…" : `对「${column}」获取建议`}
+            </button>
+          )}
+        </div>
+        {!llmStatus ? (
+          <div className="text-text-3">加载中…</div>
+        ) : !llmStatus.enabled ? (
+          <div className="text-text-2 text-[11.5px]" data-testid="llm-hint">
+            可选功能未启用：在 studio-api 侧设置环境变量 <span className="mono">LLM_BASE_URL</span> 与{" "}
+            <span className="mono">LLM_API_KEY</span> 后重启。启用后仅发送列名与少量样本值到你所配置的服务。
+          </div>
+        ) : llmSuggestions === null ? (
+          <div className="text-text-2 text-[11.5px]">选择上方列后点击获取——建议仅供预览，勾选后才应用到数据。</div>
+        ) : llmSuggestions.length === 0 ? (
+          <div className="text-text-2 text-[11.5px]">模型未给出建议（可换个列试试）。</div>
+        ) : (
+          <div className="grid gap-1.5">
+            {llmSuggestions.map((item, i) => {
+              const op = item as { op?: string };
+              return (
+                <label key={i} className="flex items-start gap-2 px-2.5 py-1.5 rounded-sm border border-border bg-surface cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={llmChecked[i] ?? false}
+                    onChange={(e) => setLlmChecked((prev) => ({ ...prev, [i]: e.target.checked }))}
+                    className="mt-0.5"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-[12.5px] font-medium">
+                      {op.op === "core/mass-edit" ? "值替换" : op.op === "core/text-transform" ? "文本变换" : op.op}
+                    </div>
+                    <div className="mono text-[10.5px] text-text-2 break-all">{JSON.stringify(item)}</div>
+                  </div>
+                </label>
+              );
+            })}
+            <div>
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy || llmBusy || !Object.values(llmChecked).some(Boolean)}
+                onClick={() => void applySuggestions()}
+                data-testid="llm-apply"
+              >
+                应用所选建议
+              </button>
+            </div>
+          </div>
+        )}
+        {llmError && (
+          <div className="card p-2.5 bg-fail-soft border-fail-line text-fail mt-2" data-testid="llm-error">
+            {llmError}（数据未变，可重试或手动操作）
           </div>
         )}
       </div>

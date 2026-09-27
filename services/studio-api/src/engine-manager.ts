@@ -11,11 +11,24 @@ import {
 export class EngineManager {
   private handle: EngineHandle | null = null;
   private starting: Promise<EngineHandle> | null = null;
+  private readyCallbacks: Array<() => void> = [];
+
+  /** 首次引擎就绪后执行一次（孤儿清扫等启动任务，M4/Q2）。 */
+  onFirstReady(cb: () => void): void {
+    this.readyCallbacks.push(cb);
+  }
 
   async ensureEngine(): Promise<OpenRefineClient> {
     if (!this.handle) {
       this.starting ??= startEngine().then((handle) => {
         this.handle = handle;
+        for (const cb of this.readyCallbacks.splice(0)) {
+          try {
+            cb();
+          } catch (err) {
+            console.error("[engine-manager] first-ready callback failed:", err);
+          }
+        }
         return handle;
       });
       try {
