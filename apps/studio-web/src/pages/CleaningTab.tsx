@@ -402,6 +402,9 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
                   <input type="checkbox" checked={clustererAlt} onChange={(e) => setClustererAlt(e.target.checked)} />
                   换一种算法（knn/编辑距离）
                 </label>
+                <span className="text-[10.5px] text-text-2 basis-full">
+                  提示：激进算法（如 API 提供的 ngram-fingerprint）对中文可能过度合并——建议先用默认算法，高级参数经 API 使用时先小规模验证。
+                </span>
                 <span className="text-[10.5px] text-text-2">合并作为普通操作进历史，可回滚</span>
               </div>
               {clusterError && (

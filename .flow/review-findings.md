@@ -1,59 +1,33 @@
-# REVIEW 轮 1 发现（M5，code-reviewer 子代理，fresh context，2026-09-27）
+# REVIEW 轮 1 发现（M6，code-reviewer 子代理，fresh context，2026-09-27）
 
 ## 审查结论
-VERDICT: REQUEST_CHANGES — 聚类/清偿扎实；DB 接入一个功能+安全双料缺陷（DSN 凭据未编码）；容器化三处静态可判定的致命断裂；story 1 测试连通未实现无偏差记录。
+VERDICT: REQUEST_CHANGES — 认证核心（argon2id/HMAC/cookie flags/401-404 语义/守卫矩阵/SQL 注入面）质量高无旁路；但 1 个 PRD 契约违反 + 2 处虚假验收记录。
 
 ## 阻断性问题（BLOCKER）
-1. [Dockerfile:50,79 ↔ engine.ts:22,62] 引擎路径不匹配：engine.ts 期望 workspace/dist/openrefine-3.10.1，entrypoint symlink 缺版本层——容器内引擎永远 missing。复检：docker run ls dist/openrefine-3.10.1/refine 存在。
-2. [Dockerfile:39,63 ↔ pybridge.ts:9] venv 复制进无 Python 的 node:25-slim：.venv/bin/python 断链——pybridge 全任务不可用（上传/画像/质量/db_fetch/管道全挂）。复检：docker run /app/pybridge/.venv/bin/python -V。
-3. [Dockerfile:58-59] tsx 是 devDependency，--omit=dev 安装后入口命令 tsx: command not found。复检：npx tsx --version。
-4. [dbfetch.py:17-22] DSN 凭据未 URL 编码：密码含 @ 即断连 + 密码残段经错误消息回显（实测复现：p@ss → host='ss@dbhost'）。复检：build_dsn("postgres",{"password":"a@b"}) 解析回 a@b。
-5. [DataSourcePage/app.ts] PRD story 1「测试连通」未实现且无偏差记录。复检：PRD 11 stories 逐条对上。
+1. [app.ts:482,541,692,897,446] 5 个 GET 端点（history/recipe/lineage/versions/profile）误用 writableDataset——admin 审计读他人对象这 5 路 404，违反 N5 与 story 5。复检：admin GET 他人 /history 应 200。
+2. [auth.test.ts:108-117] 存量迁移测试空转（空库 0==0），删 backfillOwnerToAdmin 仍绿——PRD 规定的真实迁移测试不存在，U1 验收记录为假。复检：预插无 owner 行→setup→admin 经 API 可见。
+3. [apps/studio-web/test/] 前端 auth 组件测试完全缺失（setup/login/401 跳转/用户菜单），U4 三项验收勾选为假。
 
 ## 建议改进（SUGGESTION）
-- dbfetch.py:57 表名双引号未转义 + table 路径绕过 L4 白名单。
-- term-persist.test 未断言 reused===false（端口被占时退化假阳性）。
-- M4 清偿③前端区分只做一半（畸形 URL 仍显示"未配置"）。
-- app.ts:563 db 假哈希——L3 的内容寻址去重未兑现 + 0 行/失败残留孤儿文件。
-- clusters-api.test:88 测试名与内容不符（unknown column 零覆盖）。
-- ensureInstalled 不再校验 JRE：无 java 环境错误从秒级明确退化为 120s 超时。
+- setup 并发竞态（hash await 在 count+insert 之间，N6 声明不成立）：先 hash 再同步段。
+- 401 矩阵仅 7 端点低于声称的 ≥15。
+- login 用户名枚举 timing 侧信道（用户不存在时跳过 verify）。
+- 新库 DDL 不含 owner_id（依赖 setup ALTER）。
+- /api/auth/me 重复实现中间件逻辑。
 
 ## 覆盖确认
-- 已检查：21 修改 + 10 新文件全文；DSN 特殊字符 venv 实测复现；verify 全链重跑一致；Dockerfile 三 BLOCKER 均静态可判定。
+- 已检查：33 条路由守卫矩阵逐一核对；preHandler 先注册路由生效实证；argon2 默认参数确认；SQL 全参数化；HMAC 时序安全；cookie flags；verify 完整重跑一致。
+- 查过无发现：授权旁路/SQL注入/HML 时序/session key 泄漏/COLLATE NOCASE/401 循环保护/测试削弱。
 
 ---
 
-# REVIEW 轮 2 发现（M5，fresh code-reviewer，2026-09-27）
+# REVIEW 轮 2 发现（M6，fresh code-reviewer，2026-09-27）
 
 ## 审查结论
-VERDICT: REQUEST_CHANGES — 轮 1 的 B1/B3 闭合、B5 实现但语义未闭合、B4 修复函数选错（quote_plus 空格密码断裂）；另有两处轮 1 未抓到的静态致命断裂（trixie 无 openjdk-17；server.ts 硬编码 127.0.0.1）。verify 亲跑一致。
+VERDICT: PASS（APPROVE_WITH_COMMENTS）— 三 BLOCKER 真实修复且经运行时/代码双重验证（含独立直插 DB 验证 admin 读他人端点恢复 200）；懒写副作用疑点查过无发现（幂等 UPDATE + 同步 check-insert + UNIQUE 兜底）。
 
-## 阻断性问题（BLOCKER）
-1. [Dockerfile:40] openjdk-17-jre-headless 在 python:3.14-slim（trixie）不存在——构建即断。修：openjdk-21-jre-headless 或钉 bookworm。
-2. [server.ts:15] API 硬编码 127.0.0.1，容器端口发布后不可达 + healthcheck 掩盖。修：HOST env + Dockerfile/compose 设 0.0.0.0。
-3. [dbfetch.py:19] quote_plus 空格密码 roundtrip 断裂（a b → a+b）。修：quote(v, safe="")。
-4. [app.ts:564,599-612] 三处残留文件：test 端点 probe 文件无清理；0 行 422 前 outCsv 孤儿；重复拉取 hash 命中时新 db-*.csv 残留。
+## 建议（5 条，作者已修 3）
+1. isolation 补 5 端点 B1 回归锁定（已修）。2. 用户菜单/登出组件测试（记录未修——U6 浏览器手工实证支撑，验收措辞已核）。3. tasks U1 端点数改实际 7（已修）。4. 迁移测试补 pipelines DB 层断言（已修）。5. suggest 未配置分支无测试（记录移交）。
 
-## 建议改进（SUGGESTION）
-- 修复记录"建议 1-6 全修"失实（reused 锁定/clusters 测试名/JRE 快速失败三条未落地）。
-- term-persist 无 reused 断言；clusters 测试名实不符；ensureInstalled 文档串与实现不符。
-- app.ts:607 name/table 进文件名无消毒（路径穿越面）。
-- 无 .dockerignore（构建上下文含 GB 级 workspace）；test/ 进镜像。
-- /api/sources/db/test 与 DataSourcePage 零测试；llm degraded 未断言。
-- 动态 import("node:crypto") 与顶部 createHash 重复。
-
-## 待确认
-- nodesource setup_25.x 在 trixie 的可用性（沙箱 dists 404 无法定论）；OpenRefine @ Java21 未实测。
-
----
-
-# REVIEW 轮 3 发现（M5，fresh code-reviewer，2026-09-27）
-
-## 审查结论
-VERDICT: PASS — 轮 2 四 BLOCKER 行为层面全部实证闭合（DSN 7 例矩阵/trixie+bookworm openjdk-21 双源验证/nodesource Release 200/零残留断言实跑）。遗留全部为注释/测试名/记录失实类非阻断项。
-
-## 建议（6 条，作者已当场全部修复落地）
-1. engine.ts 注释 openjdk-17→21。2. DSN roundtrip 矩阵常驻测试（此前声称存在实无——7 例参数化已落地）。3. 动态 crypto import 去重（上轮声称已修实未改——本轮真实落地）。4. clusters 测试名残留失实子句（第二次修正）。5. JRE 快速失败（两轮声称均未落地——本轮真实落地）。6. dbfetch tmp 窄窗口 finally 清理。
-
-## 待确认
-- docker 首次真实构建（静态闭合，环境不可用口径维持）；PG/MySQL 真实服务（PRD 口径内）。
+## 覆盖确认
+- 33 路由守卫矩阵逐一核对；独立运行时验证 admin 读他人；完整 verify 重跑一致。

@@ -122,3 +122,9 @@
 | 进程内存 | >8GB RSS = 条件 go | 峰值 ~1.8GB（堆配置 2048M） | ✅（内存随数据线性增长，见 §6 结论） |
 
 M1 按 design.md v2 路线启动：`adapters/openrefine` 以本文为契约基线，9 个怪癖进契约测试用例集；采样交互 + worker 分块按原设计保留。
+
+## 聚类端点补充（M5 实测 + M6 债清偿）
+
+`POST /command/core/compute-clusters` 表单字段 `engine` + `clusterer`（各 JSON 字符串）；`type` 只认 `binning|knn`（M0 旧文档的 keycollision 已改名 binning）；响应 `组数组[{v,c}]`。
+
+**ngram-fingerprint 过合并警示**：对中文数据，ngram-fingerprint 可能把语义不同的值聚为一组（实测 广州市/广州/Shenzhen 同组）——UI 默认 fingerprint（大小写/空白变体），ngram 类高级参数仅经 API 使用且须先小规模验证。

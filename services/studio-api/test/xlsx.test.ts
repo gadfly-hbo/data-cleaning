@@ -1,3 +1,4 @@
+import { setupAuth } from "./auth-helper.js";
 /** xlsx 全链路等价集成测试（Q1）：上传→清洗→管道→版本导出。 */
 
 import { execFileSync } from "node:child_process";
@@ -13,12 +14,15 @@ const WORKSPACE = mkdtempSync(path.join(tmpdir(), "studio-xlsx-"));
 
 let app: Awaited<ReturnType<typeof buildApp>>;
 let baseUrl = "";
+let authCookie = "";
+// 带 auth cookie 的 fetch（M6 中间件后全部业务端点需登录）
+const authFetch = (u: string, init: RequestInit = {}) => fetch(u, { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), cookie: authCookie } });
 let datasetId = 0;
 
 function pollOk(runId: number, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   const poll = async (resolve: (v: unknown) => void, reject: (e: Error) => void) => {
-    const run = (await (await fetch(`${baseUrl}/api/runs/${runId}`)).json()) as { status: string; error?: string };
+    const run = (await (await authFetch(`${baseUrl}/api/runs/${runId}`)).json()) as { status: string; error?: string };
     if (run.status === "ok") return resolve(null);
     if (run.status === "fail") return reject(new Error(`run failed: ${run.error}`));
     if (Date.now() > deadline) return reject(new Error("timeout"));
@@ -32,6 +36,7 @@ beforeAll(async () => {
   await app.listen({ port: 0, host: "127.0.0.1" });
   const addr = app.server.address();
   if (typeof addr === "object" && addr) baseUrl = `http://127.0.0.1:${addr.port}`;
+  authCookie = await setupAuth(baseUrl);
 
   // 构造含 中文/空值/日期/数字 的 xlsx
   const src = path.join(WORKSPACE, "messy-cn.xlsx");
@@ -48,7 +53,7 @@ pl.DataFrame({
 
   const form = new FormData();
   form.append("file", new File([readFileSync(src)], "messy-cn.xlsx"));
-  const res = await fetch(`${baseUrl}/api/datasets`, { method: "POST", body: form });
+  const res = await authFetch(`${baseUrl}/api/datasets`, { method: "POST", body: form });
   if (res.status !== 200) throw new Error(`upload failed: ${await res.text()}`);
   const ds = (await res.json()) as { id: number; projectId: number; rows: number; columns: string[] };
   datasetId = ds.id;
@@ -63,7 +68,7 @@ afterAll(async () => {
 
 test("xlsx: clean via engine, pipeline run, version export", async () => {
   // 清洗：广州市→广州
-  const apply = await fetch(`${baseUrl}/api/datasets/${datasetId}/operations`, {
+  const apply = await authFetch(`${baseUrl}/api/datasets/${datasetId}/operations`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -78,13 +83,13 @@ test("xlsx: clean via engine, pipeline run, version export", async () => {
   });
   expect(apply.status).toBe(200);
 
-  const rows = (await (await fetch(`${baseUrl}/api/datasets/${datasetId}/rows?offset=0&limit=1`)).json()) as {
+  const rows = (await (await authFetch(`${baseUrl}/api/datasets/${datasetId}/rows?offset=0&limit=1`)).json()) as {
     rows: unknown[][];
   };
   expect(rows.rows[0]?.[0]).toBe("广州");
 
   // 定版 + 触发管道
-  const createRes = await fetch(`${baseUrl}/api/pipelines`, {
+  const createRes = await authFetch(`${baseUrl}/api/pipelines`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ dataset_id: datasetId, name: "xlsx 管道" }),
@@ -92,21 +97,21 @@ test("xlsx: clean via engine, pipeline run, version export", async () => {
   const pipeline = (await createRes.json()) as { id: number; recipe: unknown[] };
   expect(pipeline.recipe.length).toBe(1);
 
-  const trigger = await fetch(`${baseUrl}/api/pipelines/${pipeline.id}/trigger`, { method: "POST" });
+  const trigger = await authFetch(`${baseUrl}/api/pipelines/${pipeline.id}/trigger`, { method: "POST" });
   expect(trigger.status).toBe(202);
   const { run_id: runId } = (await trigger.json()) as { run_id: number };
   await pollOk(runId);
 
   // 版本导出：raw=v1 xlsx 原件字节；v2 产物 CSV 已清洗
   // raw 版本预览含日期列不 500（REVIEW 轮 1 BLOCKER 3 复检判据——轮 2 补上真测试）
-  const rawRows = await fetch(`${baseUrl}/api/datasets/${datasetId}/rows?version=1&offset=0&limit=2`);
+  const rawRows = await authFetch(`${baseUrl}/api/datasets/${datasetId}/rows?version=1&offset=0&limit=2`);
   expect(rawRows.status).toBe(200);
   const rawRowsBody = (await rawRows.json()) as { rows: unknown[][] };
   expect(rawRowsBody.rows[0]?.[2]).toBe("2026-01-05"); // 日期 ISO 出口（rows_page 经 _jsonify）
 
-  const rawExport = await fetch(`${baseUrl}/api/datasets/${datasetId}/export?version=1`);
+  const rawExport = await authFetch(`${baseUrl}/api/datasets/${datasetId}/export?version=1`);
   expect(rawExport.headers.get("content-type")).toContain("spreadsheetml");
-  const v2Export = await fetch(`${baseUrl}/api/datasets/${datasetId}/export?version=2`);
+  const v2Export = await authFetch(`${baseUrl}/api/datasets/${datasetId}/export?version=2`);
   expect(v2Export.status).toBe(200);
   const csv = await v2Export.text();
   expect(csv).not.toContain("广州市");

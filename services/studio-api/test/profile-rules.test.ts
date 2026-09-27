@@ -1,3 +1,4 @@
+import { setupAuth } from "./auth-helper.js";
 /** 画像/规则编排集成测试：真实 pybridge + 真实引擎，串行执行。 */
 
 import { mkdtempSync, readFileSync } from "node:fs";
@@ -17,6 +18,9 @@ const WORKSPACE = mkdtempSync(path.join(tmpdir(), "studio-t5-"));
 let app: Awaited<ReturnType<typeof buildApp>>;
 let brokenApp: Awaited<ReturnType<typeof buildApp>> | null = null;
 let baseUrl = "";
+let authCookie = "";
+// 带 auth cookie 的 fetch（M6 中间件后全部业务端点需登录）
+const authFetch = (u: string, init: RequestInit = {}) => fetch(u, { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), cookie: authCookie } });
 let datasetId = 0;
 
 beforeAll(async () => {
@@ -25,6 +29,7 @@ beforeAll(async () => {
   const addr = app.server.address();
   if (typeof addr === "object" && addr) baseUrl = `http://127.0.0.1:${addr.port}`;
   else throw new Error("no address");
+  authCookie = await setupAuth(baseUrl);
 }, 600_000);
 
 afterAll(async () => {
@@ -35,7 +40,7 @@ afterAll(async () => {
 test("upload computes profile and quality report synchronously", async () => {
   const form = new FormData();
   form.append("file", new File([readFileSync(FIXTURE)], "messy-small.csv", { type: "text/csv" }));
-  const res = await fetch(`${baseUrl}/api/datasets`, { method: "POST", body: form });
+  const res = await authFetch(`${baseUrl}/api/datasets`, { method: "POST", body: form });
   expect(res.status).toBe(200);
   const created = (await res.json()) as {
     id: number;
@@ -53,14 +58,14 @@ test("upload computes profile and quality report synchronously", async () => {
 });
 
 test("GET profile returns stored report", async () => {
-  const res = await fetch(`${baseUrl}/api/datasets/${datasetId}/profile`);
+  const res = await authFetch(`${baseUrl}/api/datasets/${datasetId}/profile`);
   expect(res.status).toBe(200);
   const profile = (await res.json()) as { row_count: number };
   expect(profile.row_count).toBe(10);
 });
 
 test("POST rules/validate re-runs and returns fresh report", async () => {
-  const res = await fetch(`${baseUrl}/api/datasets/${datasetId}/rules/validate`, { method: "POST" });
+  const res = await authFetch(`${baseUrl}/api/datasets/${datasetId}/rules/validate`, { method: "POST" });
   expect(res.status).toBe(200);
   const report = (await res.json()) as {
     rules: Array<{ kind: string; column: string; violations: number }>;
@@ -84,24 +89,25 @@ test("bridge failure yields structured 500 and API stays alive", async () => {
 
   const res = await fetch(`${brokenUrl}/api/datasets/${datasetId}/rules/validate`, {
     method: "POST",
+    headers: { cookie: authCookie },
   });
   expect(res.status).toBe(500);
   const body = (await res.json()) as { message?: string };
   expect(body.message).toContain("simulated failure");
 
   // 锁定换序不变式（REVIEW 轮 2 建议）：桥失败的上传不得产生半注册数据集
-  const before = (await (await fetch(`${baseUrl}/api/datasets`)).json()) as {
+  const before = (await (await authFetch(`${baseUrl}/api/datasets`)).json()) as {
     datasets: unknown[];
   };
   const form = new FormData();
   form.append("file", new File([readFileSync(FIXTURE)], "bridge-fail.csv", { type: "text/csv" }));
-  const failRes = await fetch(`${brokenUrl}/api/datasets`, { method: "POST", body: form });
+  const failRes = await fetch(`${brokenUrl}/api/datasets`, { method: "POST", body: form, headers: { cookie: authCookie } });
   expect(failRes.status).toBe(500);
-  const after = (await (await fetch(`${baseUrl}/api/datasets`)).json()) as {
+  const after = (await (await authFetch(`${baseUrl}/api/datasets`)).json()) as {
     datasets: unknown[];
   };
   expect(after.datasets.length).toBe(before.datasets.length);
 
-  const health = await fetch(`${baseUrl}/api/health`);
+  const health = await authFetch(`${baseUrl}/api/health`);
   expect(health.status).toBe(200);
 });

@@ -1,47 +1,44 @@
-# Red-Team: M5 — DB 直连接入 + 聚类去重 + 容器化 + 清偿
+# Red-Team: M6 — 多用户基础（认证 + 数据隔离）
 
-> 评审对象：`.flow/proposal.md`。日期：2026-09-27。结论：**go**——两个契约假设（compute-clusters、sqlalchemy 直连矩阵）设为切片 0/1 实测；容器化设为独立可弃切片。
+> 评审对象：`.flow/proposal.md`。日期：2026-09-27。结论：**go**——认证选型与 owner 迁移是两个必测假设；范围裁剪（地基而非全 RBAC）方向正确。
 
 ## Top Kill-Assumptions（按 影响×看错概率×测试成本 排序）
 
-### 1. compute-clusters 契约可用且同步可用
-- **Claim**: 引擎聚类端点能对选定列返回相似值分组，可在工作台做成"预览→合并"交互。
-- **Steelman**: 端点在官方 UI 的 Facet→Cluster 功能背后（M0 契约文档列过端点名与两个伴随端点 get-clustering-functions-and-distances）；mass-edit 合并机制 M2 起成熟。
-- **Fails if**: 端点仅支持 facet 上下文（需要先建 facet）或返回形态不适合预览；聚类同步耗时在大列上超秒级影响交互。
-- **Evidence to get this week**: 切片 0：真实引擎对 messy 夹具 city 列（广州市/上海 vs 北京 朝阳区等）curl 实测三种聚类器（fingerprint/key-collision ngram 等）。
-- **Kill criterion**: 契约不可程序化驱动 → dedupe 降级为"top 值手动多选合并"（M2 已有能力）+ 记录偏差。
-- **Cheapest test**: 30 分钟 curl。
+### 1. 认证选型在 Node 25 + 无外部服务下可闭环
+- **Claim**: 签名 cookie session + argon2/bcrypt 哈希可在现有依赖栈内实现完整登录流。
+- **Steelman**: 单机产品无外部依赖需求；fastify cookie 插件成熟；@node-rs/argon2（Rust binding，Apache-2/MIT）或 bcryptjs（纯 JS，BSD）都是常见选择。
+- **Fails if**: 所选哈希库在 Node 25 arm64 无预编译产物且本地编译失败 → 切纯 JS bcryptjs（性能差但可用）。
+- **Kill criterion**: 两个候选都不可用（几乎不可能）→ 自研 PBKDF2（node:crypto 内置，无需第三方）。
+- **Cheapest test**: uv/npm 试装 + 哈希 roundtrip（切片 0）。
 
-### 2. sqlalchemy 直连矩阵在 py3.14 可用且许可证干净
-- **Claim**: psycopg/mysql 驱动 + sqlalchemy 在 3.14 有 wheel 且商用友好。
-- **Steelman**: sqlalchemy 2.x MIT；psycopg3 是纯 Python（pgx 路线）；mysql 官方驱动 Oracle 双许可（需核）。
-- **Fails if**: 3.14 wheel 缺失或 mysql 驱动许可证不可接受 → 驱动矩阵缩水（如 M5 仅 SQLite+PG）。
-- **Cheapest test**: uv add 试装 + 许可证核查（切片 1 内）。
-- **Kill criterion**: 许可证一票否决该驱动 → 缩矩阵并回签。
+### 2. owner 隔离在既有数据模型上可无损落地
+- **Claim**: datasets/pipelines/runs/versions 加 owner 字段 + 全端点校验 = 完整隔离。
+- **Steelman**: 表结构简单（5 张业务表），全部端点集中在 app.ts，中间件 + 每查询过滤即可。
+- **Fails if**: 引擎项目（OpenRefine project_id）成为旁路——非 owner 若能通过引擎 API 直接操作（3333 端口本机可直连，无鉴权！）。**这是最实质的风险**：任何本机进程可绕过 studio-api 直打引擎。M6 的隔离是应用层隔离，引擎网络隔离（127.0.0.1 + 随机端口/Unix socket）是否纳入？
+- **Kill criterion**: 若要求网络级隔离，范围膨胀明显（引擎 socket 化是 M7 工作）；M6 明确声明"应用层隔离，本机进程可直连引擎是已知边界"。
+- **Cheapest test**: 明确边界声明 + 文档记录。
 
-### 3. 容器化多运行时镜像可交付（Node+JRE+Python+uv+引擎 ~1GB 级）
-- **Claim**: 单镜像可构建、可启动完整服务。
-- **Fails if**: 镜像 >3GB 或首启下载在生产环境不可接受；darwin arm64 构建/运行问题。
-- **Kill criterion**: 构建不可行 → 降级 compose 多镜像（或推迟，容器化是独立可弃切片）。
-- **Cheapest test**: docker build 一次（切片内）。
+### 3. 存量数据迁移零丢失
+- **Claim**: 现有 datasets（测试库+用户库）迁移加 owner 后全部可见。
+- **Fails if**: 存量行 owner 为 NULL → 任何人都看不见（数据"消失"）。
+- **Kill criterion**: 迁移策略必须给存量行显式归属（首管理员）+ 迁移测试。
 
-### 4. 一轮交付四组件的预算
-- **Steelman**: DB 接入与聚类都是既有链路的延伸（注册数据集/mass-edit），无新架构面。
-- **Fails if**: 容器化调试吞噬预算。
-- **Kill criterion**: 熔断保底 =「聚类去重 + M4 清偿」；DB 接入与容器化独立可弃。
+### 4. 一轮预算（前五轮每轮 2-3 轮审查）
+- **Fails if**: 认证细节（cookie flags/TTL/csrf）膨胀。
+- **Kill criterion**: 熔断保底 =「认证 + 隔离 + 存量迁移」；文档项独立可弃。
 
 ## What's Well-Reasoned
 
-- 直连替代 SeaTunnel/DataX 的裁剪有明确形态依据（单机按需起停 vs JVM 集群），是具体化不是推翻，且记录了重评条件（云端/多用户）。
-- dedupe 走 mass-edit 同构机制——零新状态形态，历史/回滚/管道全部免费获得。
-- 清偿项全部小且具体（五条来自上轮审查）。
-- 连接信息不落盘（最小安全面）符合渐进。
+- "地基而非全 RBAC"裁剪与 M4/M5 同模式（承诺债优先、一轮可交付）。
+- 引擎旁路风险被主动识别（本机 3333 无鉴权）而非假装不存在——边界声明是正确处理。
+- 封闭式用户创建（管理员建号）对本地单机产品合理，注册开放确需产品决策。
+- M5 移交项全部有去向（做/记录/环境限制标注）。
 
 ## What I Couldn't Assess
 
-- 用户真实 DB 环境分布（PG vs MySQL 占比——影响驱动矩阵优先级）。
-- docker 在本机是否可用（构建实验环境依赖）。
+- 用户预期的并发用户数（2-5 人本地 vs 更多——影响 session TTL 与引擎资源竞争模型，M6 不深究）。
+- 是否有远程访问诉求（当前"本地单机维持"是推断——design.md 未明示网络暴露意图）。
 
 ## 净结论
 
-go。切片 0 = compute-clusters 契约实测；切片 1 = 驱动矩阵试装+许可证核查；容器化独立最后、可弃。
+go。切片 0 = 哈希选型试装 + 签名 cookie roundtrip；引擎旁路边界写进 proposal 的 PRD 并在 UI/文档声明；存量迁移有测试。

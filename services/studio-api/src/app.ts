@@ -10,8 +10,16 @@ import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { createReadStream } from "node:fs";
 import {
+  backfillOwnerToAdmin,
   getDataset,
+  getUser,
+  getUserByName,
+  insertUser,
   listDatasets,
+  listUsers,
+  resetUserPassword,
+  setUserDisabled,
+  userCount,
   getPipeline,
   getRun,
   getVersion,
@@ -36,6 +44,10 @@ import { EngineManager } from "./engine-manager.js";
 import { ENGINE_PORT, OpenRefineClient } from "@data-cleaning/adapter-openrefine";
 import { PyBridgeExecutor } from "./pybridge.js";
 import { startScheduler } from "./scheduler.js";
+import {
+  SESSION_COOKIE, SESSION_TTL_MS, SessionKey,
+  hashPassword, validatePassword, validateUsername, verifyPassword,
+} from "./auth.js";
 import { requestSuggestions, resolveLlmConfig, type LlmConfig, type SuggestionColumn } from "./llm.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -69,6 +81,7 @@ function toApi(rec: DatasetRecord) {
 export async function buildApp(opts: AppOptions = {}) {
   const workspace = opts.workspaceDir ?? path.join(REPO_ROOT, "workspace");
   const db = openDb(path.join(workspace, "studio.db"));
+  const sessionKey = new SessionKey(path.join(workspace, ".session-key"));
   for (const staleId of failStaleRuns(db)) {
     // 上次进程退出遗留的 running run 一律置 fail（否则管道永久 409/调度停摆）；
     // 其孤儿产物文件（若子进程在进程退出后写完）一并清理
@@ -135,6 +148,179 @@ export async function buildApp(opts: AppOptions = {}) {
   const app = fastify({ logger: false });
   await app.register(multipart, { limits: { fileSize: MAX_UPLOAD_BYTES } });
 
+  // ===== 用户管理（M6/U3：admin 专用）=====
+
+  function requireAdmin(req: unknown, reply: { code: (c: number) => { send: (b: unknown) => unknown } }): boolean {
+    if (actor(req).role !== "admin") {
+      reply.code(403).send({ error: "admin only" });
+      return false;
+    }
+    return true;
+  }
+
+  app.get("/api/users", async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    return { users: listUsers(db) };
+  });
+
+  app.post("/api/users", async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const body = req.body as { username?: string; password?: string } | null | undefined;
+    if (!body?.username || !body?.password) {
+      return reply.code(400).send({ error: "username and password required" });
+    }
+    const uErr = validateUsername(body.username);
+    if (uErr) return reply.code(422).send({ error: uErr });
+    const pErr = validatePassword(body.password);
+    if (pErr) return reply.code(422).send({ error: pErr });
+    if (getUserByName(db, body.username)) {
+      return reply.code(409).send({ error: `用户名已存在: ${body.username}` });
+    }
+    const user = insertUser(db, body.username, await hashPassword(body.password), "user");
+    return reply.code(200).send({ id: user.id, username: user.username, role: user.role });
+  });
+
+  app.post("/api/users/:id/disable", async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const { id } = req.params as { id: string };
+    const target = getUser(db, Number(id));
+    if (!target) return reply.code(404).send({ error: `user ${id} not found` });
+    if (target.role === "admin") return reply.code(422).send({ error: "cannot disable admin" });
+    setUserDisabled(db, target.id, !target.disabled);
+    return { id: target.id, disabled: !target.disabled };
+  });
+
+  app.post("/api/users/:id/reset-password", async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const { id } = req.params as { id: string };
+    const body = req.body as { password?: string } | null | undefined;
+    if (!body?.password) return reply.code(400).send({ error: "password required" });
+    const pErr = validatePassword(body.password);
+    if (pErr) return reply.code(422).send({ error: pErr });
+    const target = getUser(db, Number(id));
+    if (!target) return reply.code(404).send({ error: `user ${id} not found` });
+    resetUserPassword(db, target.id, await hashPassword(body.password));
+    return { ok: true };
+  });
+
+  // ===== 隔离语义（M6/U2：N4-N5——401 认证挑战 / 404 不泄漏存在性；admin 读全量写同人）=====
+
+  function actor(req: unknown): { id: number; role: "admin" | "user" } {
+    return (req as { user: { id: number; role: "admin" | "user" } }).user;
+  }
+
+  /** 读守卫：返回记录或 null；admin 全见，user 只见自己的（null=404）。 */
+  function visibleDataset(req: unknown, id: number): DatasetRecord | null {
+    const rec = getDataset(db, id);
+    if (!rec) return null;
+    const u = actor(req);
+    if (u.role !== "admin" && rec.owner_id !== u.id) return null;
+    return rec;
+  }
+
+  /** 写守卫：即使 admin 也只能操作自己的（PRD diff 3）。 */
+  function writableDataset(req: unknown, id: number): DatasetRecord | null {
+    const rec = getDataset(db, id);
+    if (!rec) return null;
+    if (rec.owner_id !== actor(req).id) return null;
+    return rec;
+  }
+
+  function visiblePipeline(req: unknown, id: number): PipelineRecord | null {
+    const p = getPipeline(db, id);
+    if (!p) return null;
+    const u = actor(req);
+    if (u.role !== "admin" && p.owner_id !== u.id) return null;
+    return p;
+  }
+
+  function writablePipeline(req: unknown, id: number): PipelineRecord | null {
+    const p = getPipeline(db, id);
+    if (!p) return null;
+    if (p.owner_id !== actor(req).id) return null;
+    return p;
+  }
+
+  // ===== 认证（M6/U0-U1）=====
+
+  function sessionCookie(token: string): string {
+    return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`;
+  }
+  function clearSessionCookie(): string {
+    return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+  }
+  function readSessionToken(req: { headers: { cookie?: string } }): string | undefined {
+    const cookie = req.headers.cookie ?? "";
+    for (const part of cookie.split(";")) {
+      const [k, ...v] = part.trim().split("=");
+      if (k === SESSION_COOKIE) return v.join("=");
+    }
+    return undefined;
+  }
+
+  app.get("/api/auth/setup-status", async () => ({ needs_setup: userCount(db) === 0 }));
+
+  app.post("/api/auth/setup", async (req, reply) => {
+    if (userCount(db) > 0) return reply.code(409).send({ error: "setup already done" });
+    const body = req.body as { username?: string; password?: string } | null | undefined;
+    if (!body?.username || !body?.password) {
+      return reply.code(400).send({ error: "username and password required" });
+    }
+    const uErr = validateUsername(body.username);
+    if (uErr) return reply.code(422).send({ error: uErr });
+    const pErr = validatePassword(body.password);
+    if (pErr) return reply.code(422).send({ error: pErr });
+    const user = insertUser(db, body.username, await hashPassword(body.password), "admin");
+    backfillOwnerToAdmin(db); // 存量数据归属首管理员（幂等）
+    const token = sessionKey.sign({ uid: user.id, exp: Date.now() + SESSION_TTL_MS });
+    return reply.header("set-cookie", sessionCookie(token)).send({ id: user.id, username: user.username, role: user.role });
+  });
+
+  app.post("/api/auth/login", async (req, reply) => {
+    const body = req.body as { username?: string; password?: string } | null | undefined;
+    if (!body?.username || !body?.password) {
+      return reply.code(400).send({ error: "username and password required" });
+    }
+    const user = getUserByName(db, body.username);
+    if (!user || !(await verifyPassword(user.password_hash, body.password))) {
+      return reply.code(401).send({ error: "用户名或密码错误" });
+    }
+    if (user.disabled) return reply.code(401).send({ error: "账号已停用" });
+    const token = sessionKey.sign({ uid: user.id, exp: Date.now() + SESSION_TTL_MS });
+    return reply.header("set-cookie", sessionCookie(token)).send({ id: user.id, username: user.username, role: user.role });
+  });
+
+  app.post("/api/auth/logout", async (_req, reply) => {
+    return reply.header("set-cookie", clearSessionCookie()).send({ ok: true });
+  });
+
+  app.get("/api/auth/me", async (req, reply) => {
+    const payload = sessionKey.verify(readSessionToken(req));
+    if (!payload) return reply.code(401).send({ error: "not logged in" });
+    const user = getUser(db, payload.uid);
+    if (!user || user.disabled) return reply.code(401).send({ error: "not logged in" });
+    return user;
+  });
+
+  // auth 中间件：白名单外一律需要有效 session（U1）
+  const AUTH_WHITELIST = new Set([
+    "/api/health",
+    "/api/llm/status", // 登录页也要展示 LLM 状态；仅暴露 enabled/model/host，无敏感数据
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/setup",
+    "/api/auth/setup-status",
+  ]);
+  app.addHook("preHandler", async (req, reply) => {
+    if (!req.url.startsWith("/api/") || AUTH_WHITELIST.has(req.url.split("?")[0]!)) return;
+    // 静态资源与 SPA 路由不经此守卫（非 /api/）
+    const payload = sessionKey.verify(readSessionToken(req));
+    if (!payload) return reply.code(401).send({ error: "not logged in" });
+    const user = getUser(db, payload.uid);
+    if (!user || user.disabled) return reply.code(401).send({ error: "not logged in" });
+    (req as unknown as { user: typeof user }).user = user;
+  });
+
   app.get("/api/health", async () => ({ status: "ok", engine: engineManager.running }));
 
   app.post("/api/datasets", async (req, reply) => {
@@ -188,7 +374,9 @@ export async function buildApp(opts: AppOptions = {}) {
       const profile = await runPybridge({ task: "profile", file: rawPath });
       const quality = await runPybridge({ task: "rules", file: rawPath });
 
+      const actor = (req as unknown as { user: { id: number } }).user;
       const rec = insertDataset(db, {
+        owner_id: actor.id,
         name,
         file_hash: hash,
         file_path: rawPath,
@@ -213,20 +401,24 @@ export async function buildApp(opts: AppOptions = {}) {
     }
   });
 
-  app.get("/api/datasets", async () => ({
-    datasets: listDatasets(db).map(toApi),
-  }));
+  app.get("/api/datasets", async (req) => {
+    const u = actor(req);
+    const all = listDatasets(db);
+    // admin 全见（审计）；user 只见自己的
+    const visible = u.role === "admin" ? all : all.filter((d) => d.owner_id === u.id);
+    return { datasets: visible.map(toApi) };
+  });
 
   app.get("/api/datasets/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = visibleDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     return toApi(rec);
   });
 
   app.get("/api/datasets/:id/rows", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = visibleDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
 
     const query = req.query as { offset?: string; limit?: string; version?: string };
@@ -251,7 +443,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   app.get("/api/datasets/:id/profile", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = visibleDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     if (!rec.profile) {
       // 兼容无画像的历史行（如 T4 时期数据）：按需补算
@@ -263,7 +455,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   app.post("/api/datasets/:id/rules/validate", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = writableDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     const report = await runPybridge({ task: "rules", file: rec.file_path });
     updateReport(db, rec.id, "quality", report);
@@ -274,7 +466,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   app.post("/api/datasets/:id/operations", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = writableDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     const body = req.body as { operations?: unknown[] } | null | undefined;
     if (!body || typeof body !== "object" || !Array.isArray(body.operations) || body.operations.length === 0) {
@@ -287,7 +479,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   app.get("/api/datasets/:id/history", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = visibleDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     const client = await engineManager.ensureEngine();
     return client.getHistory(rec.project_id);
@@ -295,7 +487,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   app.post("/api/datasets/:id/history/restore", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = writableDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     const body = req.body as { lastDoneID?: number } | null | undefined;
     if (!body || typeof body !== "object" || !Number.isInteger(body.lastDoneID) || (body.lastDoneID ?? 0) < 0) {
@@ -308,7 +500,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   app.get("/api/datasets/:id/export", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = visibleDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     const query = req.query as { version?: string };
     if (query.version !== undefined) {
@@ -346,7 +538,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   app.get("/api/datasets/:id/recipe", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = visibleDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     const client = await engineManager.ensureEngine();
     const operations = await client.getOperations(rec.project_id);
@@ -435,27 +627,34 @@ export async function buildApp(opts: AppOptions = {}) {
     if (interval !== null && (!Number.isInteger(interval) || interval < 1)) {
       return reply.code(400).send({ error: "interval_minutes must be a positive integer or null" });
     }
-    const ds = getDataset(db, Number(body.dataset_id));
+    const ds = writableDataset(req, Number(body.dataset_id));
     if (!ds) return reply.code(404).send({ error: `dataset ${body.dataset_id} not found` });
 
     const client = await engineManager.ensureEngine();
     const recipe = await client.getOperations(ds.project_id); // 服务端快照当前操作历史
+    const actorP = (req as unknown as { user: { id: number } }).user;
     const pipeline = insertPipeline(db, {
+      owner_id: actorP.id,
       dataset_id: ds.id, name: String(body.name), recipe, interval_minutes: interval,
     });
     return reply.code(200).send(toPipelineApi(pipeline));
   });
 
-  app.get("/api/pipelines", async () => ({
-    pipelines: listPipelines(db).map((p) => ({
-      ...toPipelineApi(p),
-      last_run: p.last_run_status ? { status: p.last_run_status } : null,
-    })),
-  }));
+  app.get("/api/pipelines", async (req) => {
+    const u = actor(req);
+    const all = listPipelines(db);
+    const visible = u.role === "admin" ? all : all.filter((p) => p.owner_id === u.id);
+    return {
+      pipelines: visible.map((p) => ({
+        ...toPipelineApi(p),
+        last_run: p.last_run_status ? { status: p.last_run_status } : null,
+      })),
+    };
+  });
 
   app.post("/api/pipelines/:id/trigger", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const pipeline = getPipeline(db, Number(id));
+    const pipeline = writablePipeline(req, Number(id));
     if (!pipeline) return reply.code(404).send({ error: `pipeline ${id} not found` });
     if (!Array.isArray(pipeline.recipe) || pipeline.recipe.length === 0) {
       return reply.code(400).send({ error: "pipeline recipe is empty (nothing to replay)" });
@@ -473,7 +672,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   app.get("/api/pipelines/:id/runs", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const pipeline = getPipeline(db, Number(id));
+    const pipeline = visiblePipeline(req, Number(id));
     if (!pipeline) return reply.code(404).send({ error: `pipeline ${id} not found` });
     return { runs: listRuns(db, pipeline.id).map(toRunApi) };
   });
@@ -482,12 +681,15 @@ export async function buildApp(opts: AppOptions = {}) {
     const { id } = req.params as { id: string };
     const run = getRun(db, Number(id));
     if (!run) return reply.code(404).send({ error: `run ${id} not found` });
+    if (!visiblePipeline(req, run.pipeline_id)) {
+      return reply.code(404).send({ error: `run ${id} not found` }); // 经父表级联（PRD diff 4）
+    }
     return toRunApi(run);
   });
 
   app.get("/api/datasets/:id/lineage", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = visibleDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     ensureRawVersion(db, rec);
     const versions = listVersions(db, rec.id).map((v) => {
@@ -533,7 +735,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   app.post("/api/datasets/:id/clusters", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = writableDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     const body = req.body as { column?: string; type?: "binning" | "knn"; function?: string } | null | undefined;
     if (!body || typeof body !== "object" || !body.column) {
@@ -632,8 +834,9 @@ export async function buildApp(opts: AppOptions = {}) {
       const rowCount = await client.getRowCount(projectId);
       const profile = await runPybridge({ task: "profile", file: finalCsv });
       const quality = await runPybridge({ task: "rules", file: finalCsv });
+      const actor2 = (req as unknown as { user: { id: number } }).user;
       const rec = insertDataset(db, {
-        name, file_hash: csvHash, file_path: finalCsv,
+        owner_id: actor2.id, name, file_hash: csvHash, file_path: finalCsv,
         project_id: projectId, row_count: rowCount, columns: cols, profile, quality,
       });
       insertVersion(db, {
@@ -662,7 +865,7 @@ export async function buildApp(opts: AppOptions = {}) {
       return reply.code(200).send({ enabled: false, hint: "未配置：设置环境变量 LLM_BASE_URL 与 LLM_API_KEY（可选 LLM_MODEL）后重启 studio-api" });
     }
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = writableDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     const body = req.body as { column?: string } | null | undefined;
     if (!body || typeof body !== "object" || !body.column) {
@@ -691,7 +894,7 @@ export async function buildApp(opts: AppOptions = {}) {
 
   app.get("/api/datasets/:id/versions", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const rec = getDataset(db, Number(id));
+    const rec = visibleDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
     ensureRawVersion(db, rec); // 旧数据集懒迁移
     return {

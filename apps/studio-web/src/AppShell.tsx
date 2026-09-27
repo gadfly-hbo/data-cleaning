@@ -2,10 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { listDatasets, type DatasetSummary } from "./api.js";
+import { listDatasets, logout, me, type AuthUser, type DatasetSummary } from "./api.js";
 
 export function AppShell() {
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const location = useLocation();
   const activeId = Number(/\/datasets\/(\d+)/.exec(location.pathname)?.[1] ?? 0);
 
@@ -14,6 +15,12 @@ export function AppShell() {
       .then(setDatasets)
       .catch(() => setDatasets([]));
   }, [location.pathname]);
+
+  useEffect(() => {
+    me()
+      .then(setUser)
+      .catch(() => setUser(null)); // 401 已由 api 层跳 login
+  }, []);
 
   return (
     <div className="h-screen flex flex-col bg-bg text-text font-sans text-[13px]">
@@ -67,8 +74,24 @@ export function AppShell() {
               </Link>
             ))}
           </nav>
-          <div className="px-4 py-3 border-t border-border text-[10.5px] text-text-3 leading-relaxed">
-            本地运行 · 数据不出本机
+          <div className="px-4 py-3 border-t border-border grid gap-2">
+            {user && (
+              <div className="flex items-center gap-2">
+                <span className={`chip ${user.role === "admin" ? "chip-accent" : "chip-ok"}`}>
+                  {user.username}{user.role === "admin" ? " · admin" : ""}
+                </span>
+                <button
+                  type="button"
+                  className="btn-secondary ml-auto !px-2 !py-0.5 text-[11px]"
+                  onClick={() => void logout().then(() => { window.location.href = "/login"; })}
+                >
+                  登出
+                </button>
+              </div>
+            )}
+            <div className="text-[10.5px] text-text-3 leading-relaxed">
+              本地运行 · 数据不出本机
+            </div>
           </div>
         </aside>
 

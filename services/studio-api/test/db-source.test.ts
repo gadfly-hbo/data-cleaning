@@ -1,3 +1,4 @@
+import { setupAuth } from "./auth-helper.js";
 /** DB 数据源接入集成测试（S2）：SQLite 端到端 + 只读拒绝 + 密码不泄漏。 */
 
 import { execSync } from "node:child_process";
@@ -13,6 +14,9 @@ import { buildApp } from "../src/app.js";
 const WORKSPACE = mkdtempSync(path.join(tmpdir(), "studio-dbsrc-"));
 let app: Awaited<ReturnType<typeof buildApp>>;
 let baseUrl = "";
+let authCookie = "";
+// 带 auth cookie 的 fetch（M6 中间件后全部业务端点需登录）
+const authFetch = (u: string, init: RequestInit = {}) => fetch(u, { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), cookie: authCookie } });
 let dbFile = "";
 
 beforeAll(async () => {
@@ -27,6 +31,7 @@ beforeAll(async () => {
   await app.listen({ port: 0, host: "127.0.0.1" });
   const addr = app.server.address();
   if (typeof addr === "object" && addr) baseUrl = `http://127.0.0.1:${addr.port}`;
+  authCookie = await setupAuth(baseUrl);
 }, 600_000);
 
 afterAll(async () => {
@@ -34,7 +39,7 @@ afterAll(async () => {
 });
 
 function post(body: unknown) {
-  return fetch(`${baseUrl}/api/sources/db`, {
+  return authFetch(`${baseUrl}/api/sources/db`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -55,7 +60,7 @@ test("sqlite table fetch registers dataset with full pipeline parity", async () 
   expect(ds.profile?.row_count).toBe(2);
 
   // 引擎预览可用（全链路复用）
-  const rows = (await (await fetch(`${baseUrl}/api/datasets/${ds.id}/rows?offset=0&limit=1`)).json()) as {
+  const rows = (await (await authFetch(`${baseUrl}/api/datasets/${ds.id}/rows?offset=0&limit=1`)).json()) as {
     rows: unknown[][];
   };
   expect(rows.rows[0]?.[1]).toBe("张伟");
@@ -96,7 +101,7 @@ test("password-style params never echoed in errors", async () => {
 
 test("test-connection endpoint: ok + no file residue + password never echoed", async () => {
   const before = execSync(`find ${WORKSPACE}/datasets -name ".probe-*" | wc -l`).toString().trim();
-  const res = await fetch(`${baseUrl}/api/sources/db/test`, {
+  const res = await authFetch(`${baseUrl}/api/sources/db/test`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ kind: "sqlite", params: { file: dbFile } }),
@@ -108,7 +113,7 @@ test("test-connection endpoint: ok + no file residue + password never echoed", a
   const after = execSync(`find ${WORKSPACE}/datasets -name ".probe-*" | wc -l`).toString().trim();
   expect(after).toBe(before); // 探针文件清理（REVIEW 轮 2 BLOCKER 4①）
 
-  const bad = await fetch(`${baseUrl}/api/sources/db/test`, {
+  const bad = await authFetch(`${baseUrl}/api/sources/db/test`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ kind: "postgres", params: { host: "127.0.0.1", port: "1", database: "x", user: "u", password: "PW-SECRET-x" } }),

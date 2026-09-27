@@ -19,6 +19,8 @@ let db: DatabaseSync;
 
 beforeEach(() => {
   db = openDb(path.join(mkdtempSync(path.join(tmpdir(), "sched-")), "s.db"));
+  // 测试库直接建列（生产路径经 setup 的 backfillOwnerToAdmin 迁移）
+  db.exec("ALTER TABLE pipelines ADD COLUMN owner_id INTEGER");
 });
 
 afterAll(() => {
@@ -26,12 +28,12 @@ afterAll(() => {
 });
 
 test("manual pipeline (no interval) never due", () => {
-  insertPipeline(db, { dataset_id: 1, name: "manual", recipe: [{}], interval_minutes: null });
+  insertPipeline(db, { owner_id: 1, dataset_id: 1, name: "manual", recipe: [{}], interval_minutes: null });
   expect(duePipelineIds(db, new Date())).toEqual([]);
 });
 
 test("never-run interval pipeline is due exactly once (catch-up)", () => {
-  insertPipeline(db, { dataset_id: 1, name: "daily", recipe: [{}], interval_minutes: 60 });
+  insertPipeline(db, { owner_id: 1, dataset_id: 1, name: "daily", recipe: [{}], interval_minutes: 60 });
   expect(duePipelineIds(db, new Date())).toEqual([1]);
 
   const run = insertRun(db, 1); // running → 不再 due
@@ -46,7 +48,7 @@ test("never-run interval pipeline is due exactly once (catch-up)", () => {
 });
 
 test("scheduler fires due pipeline through shared execute path", async () => {
-  insertPipeline(db, { dataset_id: 1, name: "fast", recipe: [{}], interval_minutes: 1 });
+  insertPipeline(db, { owner_id: 1, dataset_id: 1, name: "fast", recipe: [{}], interval_minutes: 1 });
   const executed: number[] = [];
   const stop = startScheduler(db, async (pipeline, runId) => {
     executed.push(pipeline.id);
@@ -59,7 +61,7 @@ test("scheduler fires due pipeline through shared execute path", async () => {
 });
 
 test("stale running runs are failed on startup (REVIEW 轮 1 BLOCKER 回归)", () => {
-  insertPipeline(db, { dataset_id: 1, name: "stale", recipe: [{}], interval_minutes: null });
+  insertPipeline(db, { owner_id: 1, dataset_id: 1, name: "stale", recipe: [{}], interval_minutes: null });
   const run = insertRun(db, 1); // 模拟上次进程退出遗留的 running run
   expect(run.status).toBe("running");
 

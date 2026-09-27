@@ -1,92 +1,91 @@
-# PRD — M5：DB 直连接入 + 聚类去重 + 容器化 + M4 清偿
+# PRD — M6：多用户基础（认证 + 数据隔离）
 
-> 规格事实源：`.flow/proposal.md`（最高优先，含范围裁剪决策）。发布方式：无 issue tracker，写入 `.flow/prd.md`。
-> 红队：`.flow/red-team.md`（verdict go；切片 0 = compute-clusters 契约实测；切片 1 = 驱动矩阵试装+许可证；容器化独立可弃；熔断保底 = 聚类+清偿）。
+> 规格事实源：`.flow/proposal.md`（最高优先，含范围裁剪：地基而非全 RBAC）。发布方式：无 issue tracker，写入 `.flow/prd.md`。
+> 红队：`.flow/red-team.md`（verdict go；哈希选型与 owner 迁移为必测；引擎旁路边界主动声明）。
 
 ## Problem Statement
 
-三个缺口：① 数据在数据库里的用户必须先手工导出 CSV 才能进平台；② 相似值去重（"北京市朝阳区" vs "北京 朝阳区"）目前只能靠肉眼在 top 值里碰运气；③ 产品没有可复制的部署形态（clone 后要手工装 Node/JRE/Python 三套运行时）。另有 M4 审查移交的五条小债。
+平台至今是单用户形态——任何打开浏览器的人都能看到/修改/删除全部数据集与管道。要让两个人（如分析师+数据工程师）在同一台机器上各用各的，需要回答"谁在用"（认证）与"谁能看什么"（隔离）。另有两笔 M5 小债（ngram 警示、SeaTunnel/DataX 决策记录）。
 
 ## Solution
 
-pybridge 直连数据库（SQLite/PostgreSQL/MySQL）把整表或 SQL 结果物化为 CSV，经现有上传链路注册数据集（全链路复用）。工作台新增「聚类合并」：引擎聚类端点对选定列返回相似值分组，预览勾选后生成 mass-edit 应用（历史/回滚/管道同构免费获得）。单 Dockerfile 多阶段构建交付完整服务。五条清偿项闭环。
+SQLite users 表 + argon2id 密码哈希 + 签名 cookie session（HMAC-SHA256，密钥首启生成落盘）；全部业务端点经 auth 中间件；datasets/pipelines/versions 加 owner 字段（存量归首管理员）；admin 全可见+用户管理；未登录 401 → 前端登录页。**应用层隔离边界声明**：本机进程可直连引擎 3333 端口绕过隔离（已知边界，UI/文档声明；网络级隔离 M7）。
 
 ## User Stories
 
 业务分析人员（最终用户）：
 
-1. 作为业务分析人员，我要填数据库连接（类型/主机/库名/凭据）并测试连通，以便确认能访问我的数据。
-2. 作为业务分析人员，我要选择整表或输入 SQL，把结果拉进平台成为数据集，后续画像/质量/清洗/管道与上传文件完全一致。
-3. 作为业务分析人员，我要在工作台对选定列点「查找相似值」，看到聚类分组（每组：代表值 + 成员 + 计数），以便发现"北京市朝阳区/北京 朝阳区"这类变体。
-4. 作为业务分析人员，我要勾选组内合并目标值后应用，合并作为普通操作进历史、可回滚、可进管道。
-5. 作为业务分析人员，DB 拉取失败（连不上/SQL 错）要得到明确错误，不留半成品。
-6. 作为业务分析人员，数据库密码不能被保存或出现在日志里（一次性行为，用完即弃）。
+1. 作为用户，首次启动（无用户时）我要被引导到 setup 页创建管理员账号（用户名+密码），以便平台有第一个身份。
+2. 作为用户，我要用用户名密码登录，得到 httpOnly cookie session，以便后续请求被识别。
+3. 作为用户，我只能看到/操作自己名下的数据集、管道、版本；别人的对我不可见（列表/详情/操作/导出一律 404）。
+4. 作为用户，我要能登出（session 失效）。
+5. 作为管理员，我要能看到所有人的数据集与管道（审计视角），但仍只操作自己的（admin 只读他人——PRD 决）。
+6. 作为管理员，我要能创建/停用用户与重置密码（最小用户管理）。
 
 平台开发者（我方）：
 
-7. 作为平台开发者，compute-clusters 契约要有常驻测试（聚类器×响应形态×性能），未实测债清零。
-8. 作为平台开发者，DB 驱动矩阵的许可证要逐个核查入库（uv.lock + 记录）。
-9. 作为平台开发者，`docker build` 产出可运行镜像（一条命令起服务），README 有部署节。
-10. 作为平台开发者，M4 轮 3 五条清偿项全部闭环（见 Implementation Decisions 末）。
-11. 作为平台开发者，连接参数不落盘、不进日志；SQL 拉取设置只读语义（无写操作面——引擎只读查询）。
+7. 作为平台开发者，未登录访问任何业务 API 返回 401；登录/健康检查/setup 之外无旁路。
+8. 作为平台开发者，密码存储用 argon2id（或等强哈希）；session cookie 签名密钥不在代码库。
+9. 作为平台开发者，存量数据集迁移后全部归属首管理员，零"消失"（迁移测试锁定）。
+10. 作为平台开发者，上传/DB 拉取创建的数据集自动归属当前用户。
+11. 作为平台开发者，ngram 聚类过合并风险在聚类 UI 与 API 文档可见（M5 债）；SeaTunnel/DataX 决策记录追加 design.md（M5 债）。
 
 ## Implementation Decisions
 
-- **DB 接入（直连路线，proposal 已定）**：pybridge 新增 `db_fetch` 任务：stdin `{task, kind: sqlite|postgres|mysql, dsn 或离散参数, table? , query?, out_csv}` → sqlalchemy create_engine（`sqlite+sqlite3` / `postgresql+psycopg` / `mysql+pymysql`，许可证核查后定）→ `read_sql` → 写 CSV（原子写，同 convert 口径）→ stdout `{rows, columns}`。studio-api `POST /api/sources/db`：body `{kind, params, table?|query?, name?}` → 校验 → runPybridge db_fetch 到内容寻址目录 → 走与文件上传完全相同的注册链路（引擎项目/raw v1/画像/质量）。**连接信息仅存在于请求内存中**：不写库、不打日志（request body 以 `[REDACTED]` 记录）、错误消息不回显密码。
-- **驱动矩阵与依赖**：sqlalchemy（MIT）+ psycopg[binary]（LGPL-3——纯客户端使用合规，记录）或 asyncpg（Apache-2，若 psycopg 许可证被否决）+ pymysql（MIT）。切片 1 试装定案入 uv.lock。
-- **聚类合并（dedupe）**：
-  - adapter 新增 `computeClusters(projectId, columnName, clusterer, params)`——POST `/command/core/compute-clusters`（契约形态切片 0 实测定型后固化）。
-  - studio-api `POST /api/datasets/:id/clusters` `{column, clusterer?}` → 返回分组数组；前端「聚类合并」面板：选列 → 请求 → 组卡片（勾选整组、每组目标值可改为组内代表或自定义）→「应用合并」把勾选组装成一个 mass-edit 操作经现有 `POST /operations` 提交。
-  - 默认聚类器与参数（fingerprint/key-collision 类）以切片 0 实测效果定；UI 不暴露全部参数（高级参数留 API）。
-- **容器化**：单 Dockerfile 多阶段（builder: node+npm install/build web + uv sync pybridge；runtime: node slim + JRE（temurin 21 jre apt 层）+ 复制 workspace 引擎资产 or 首启 setup-engine 下载——以构建实验定，倾向构建期下载保证镜像开箱即用）+ `docker compose` 样例（卷挂 workspace）+ README 部署节。健康检查 /api/health。
-- **M4 轮 3 清偿五项**：
-  1. 冷启动重叠窗口：startEngine 探测复用时，若本地 spawn 的 child 已早退（绑定失败）转判复用语义（child=null + reused=true）。
-  2. pkill 兜底 -9 → -15 优先（`pkill -15 ... ; sleep 2; pkill -9 ... || true`）。
-  3. 畸形 LLM_BASE_URL：降级分支补单测；前端 status 区分「未配置」与「配置错误」。
-  4. _jsonify 双份合并到 pybridge/common.py，profile/rules/pipeline 统一引用。
-  5. TERM 落盘完整性实验：adapter 契约测试新增「apply → stop → start → 数据/历史完好」断言（轮 1 对照实验的常驻化）。
+- **密码哈希**：`@node-rs/argon2`（Rust binding，MIT/Apache-2 双许可，预编译多平台）；试装失败回退 `bcryptjs`（纯 JS，BSD-3）——切片 0 定案。
+- **Session**：自研签名 cookie——payload `{uid, exp}` JSON + HMAC-SHA256（node:crypto，密钥 32B 随机生成存 `workspace/.session-key`，0600 权限）；TTL 7 天；登出=客户端删 cookie（签名 cookie 无服务端状态，登出即过期由 exp 保证——接受"登出后旧 cookie 理论仍有效至 exp"的已知边界，PRD 级决策：本地单机可接受）。
+- **用户表**：`users(id, username UNIQUE COLLATE NOCASE, password_hash, role 'admin'|'user', disabled 0|1, created_at)`；首用户 role=admin；密码策略：≥8 字符（setup/register 校验，服务端+前端）。
+- **Auth 中间件**：fastify preHandler——解析 cookie 验签+查过期+查 disabled → req.user；白名单：`/api/health`、`/api/auth/login`、`/api/auth/setup-status`、`POST /api/auth/setup`（仅当 users 空表）；其余一律 `req.user` 必需。
+- **owner 隔离**：`datasets.owner_id`、`pipelines.owner_id`（runs/versions 经 join 父表级联——不单独加列）；查询过滤：`admin ? 全量 : owner_id=uid`；操作守卫：非 owner 非 admin → 404（不泄漏存在性）；**admin 对他人对象只读**（写操作仍 404——简化语义）。
+- **存量迁移**：`ALTER TABLE ... ADD COLUMN owner_id INTEGER`（SQLite 允许 NULL 默认）+ 回填 `UPDATE ... SET owner_id=(SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1)`——在 setup 创建首管理员后执行一次（幂等：owner_id IS NULL 才回填）。
+- **用户管理端点**：`GET/POST /api/users`（admin）、`POST /api/users/:id/disable`、`POST /api/users/:id/reset-password`（admin）；**无自助注册**（proposal 已定封闭式）。
+- **前端**：`/setup`（users 空时创建管理员表单→成功跳 login）、`/login`（用户名+密码+错误提示）、AppShell 用户菜单（身份 chip + 登出）、fetch 401 统一跳 login；DESIGN.md 规范。
+- **M5 债**：聚类面板「换一种算法」旁加一行提示（"激进算法可能过度合并——ngram 类建议先小规模验证"）；docs/spikes 契约文档 clusters 节补 ngram 警示；design.md 追加 SeaTunnel/DataX 决策段（依据同 daemon 备注模式：单机直连已覆盖、云端/多用户触发重评）。
+- **README**：多用户说明（setup/登录/用户管理）+ docker/PG/MySQL 环境验证状态标注更新。
 
 ## Testing Decisions
 
-- 只测外部行为；seam：pybridge `db_fetch`/`rows` CLI 协议、adapter `computeClusters` 公共接口、studio-api sources/clusters 端点（HTTP）、前端组件（fetch 边界）。
-- db_fetch：临时 SQLite 文件夹具（建表+数据）→ 整表/SQL/失败（坏 DSN、坏 SQL）四形态；PG/MySQL 若本机无服务则驱动级冒烟（import + DSN 构造）+ 文档标注（真实服务验证留用户环境）。
-- clusters：真实引擎契约测试（messy 夹具 city 列——广州市/上海 等已知相似值断言分组行为）；API 端点集成（返回分组结构）；前端聚类面板组件测试（分组渲染/勾选/合并提交体）。
-- 容器化：构建成功 + 容器内 /api/health 200 + 上传冒烟（如 CI/docker 环境可用；本机 docker 不可用则 Dockerfile 静态审查 + 记录未验证）。
-- 清偿项：各配一条测试或修正既有测试（pkill 语义/LLM 状态/TERM 落盘实验常驻化）。
-- 浏览器手动端到端（DB 接入→画像；聚类预览→合并→回滚）记录进 tasks.md。
+- 只测外部行为；seam：auth 端点 + 业务端点的 HTTP（cookie 处理）、前端登录/setup 组件（fetch 边界）。
+- 集成测试（真实 app + 引擎）：setup→login→me；未登录 401 矩阵（datasets/pipelines/operations/clusters/sources 全端点）；两用户隔离（A 建 B 看不见）；admin 全见+他人只读；登出后 401；disabled 用户 401；存量迁移（预插无 owner 数据→setup→归属 admin 可见）。
+- 密码哈希：roundtrip + 错误密码拒绝 + 空/短密码拒绝。
+- 前端：登录表单分发、setup 表单、401 跳转、用户菜单。
+- 浏览器手动端到端（两浏览器 profile 各自登录互不可见）记录 tasks.md。
 
 ## Out of Scope
 
-- SeaTunnel/DataX 重集成（云端/多用户形态再评估）；增量同步/变更捕获（CDC）。
-- 多用户/RBAC/鉴权（M6）；数据源凭据保险库（保存连接）——M5 连接一次性。
-- 聚类参数全量 UI、自定义距离函数插件化。
-- LLM 对话式；版本保留策略。
+- 完整 RBAC 角色矩阵（editor/viewer 多级）→ M7；S3/分布式/协作 → 远期。
+- 自助注册开放、密码找回、邮箱、SSO/OAuth。
+- 网络级引擎隔离（socket 化/随机端口）→ M7（本机 3333 直连是已知边界）。
+- session 服务端撤销列表（登出即失效至 exp 的强化）。
+- 审计日志（谁在何时做了什么——版本/runs 已有事实源，专用审计流后续）。
 
 ## Further Notes
 
-- 熔断保底 =「聚类去重 + 五条清偿」；DB 接入与容器化按序独立可弃。
-- M4 轮 3 待确认项（TOCTOU 毫秒窗、dev 并发冷启动）不在清偿内，维持记录。
+- 熔断保底 =「认证 + 隔离 + 迁移」；文档项（M5 债）独立可弃。
+- 引擎旁路边界必须在 UI 可见（登录页脚注或关于）：声明"本机进程可直接访问数据引擎——本产品为本地单机设计"。
 
 ## GRILL 决议（自答，2026-09-27）
 
 零升级（实现细节级，有可辩护推荐）：
 
-- **L1 聚类参数形态**：API `clusterer` 可选（默认 `fingerprint`，切片 0 实测后可改默认）；UI 只给"默认/换一种"二选一，全参数留 API。
-- **L2 DB 连接形态**：离散字段（host/port/db/user/password/file），服务端拼 DSN——避免用户提交含密码的完整 DSN 明文；SQLite 用 file 字段。
-- **L3 db_fetch 输出**：out_csv 由 studio-api 指定到内容寻址临时路径，成功后进入与上传相同的注册链路（含 hash 去重）。
-- **L4 SQL 只读保护**：query 非SELECT/WITH 开头即 422 拒绝（白名单正则）+ 文档标注"只读语义"；不做事务级只读（驱动差异大）。
-- **L5 聚类 UI 位置**：清洗 tab 操作模式新增「聚类合并」（与值替换/文本变换并列第三模式）。
-- **L6 容器内 Python 依赖**：uv sync --frozen（lock 为唯一事实源）；镜像内引擎构建期下载（setup-engine 幂等脚本复用）。
-- **L7 驱动许可证预判**：psycopg 若 LGPL-3 引发顾虑则切 asyncpg（Apache-2）；pymysql MIT——切片 1 定案并记录。
-- **L8 pkill 清偿语义**：`pkill -15 …; sleep 2; pkill -9 … || true`（TERM 优先，KILL 兜底）。
+- **N1 密码策略**：≥8 字符无复杂度强制（本地单机、NIST 长度优先）；username 3-32 字符、大小写不敏感唯一。
+- **N2 session cookie 名**：`dc_session`；`httpOnly; SameSite=Lax; Path=/`（本地无 HTTPS——Secure flag 不设，文档声明远程部署需反代 TLS）。
+- **N3 密钥文件**：`workspace/.session-key`（0600，32B hex）；首次 buildApp 生成；不存在时登录/setup 报 500 带指引。
+- **N4 401 vs 404 语义**：未登录=401（认证挑战）；登录但无权=404（不泄漏存在性）——两类不混。
+- **N5 admin 他人只读的实现口径**：读端点（GET）admin 不过滤 owner；写端点（POST/DELETE/restore/trigger/operations/clusters suggest）admin 与 user 同规则只操作自己的——语义简单一致。
+- **N6 setup 竞态**：POST /api/auth/setup 仅在 `SELECT COUNT(*) FROM users = 0` 时可写（重复调用 409）；并发首启理论竞态由 SQLite 同步写串行化（node:sqlite 同步无并发窗口）。
+- **N7 登出**：POST /api/auth/logout 清 cookie（Set-Cookie 置空）——服务端无状态可撤（N2 已知边界）。
+- **N8 禁用语义**：disabled=1 → auth 中间间即拒（等价未登录 401）；已有 session 自然失效（下次请求被拒）。
+- **N9 版本/血缘端点的隔离实现**：全部经 `getDataset(db, id)` 前置守卫（复用数据集 owner 检查）——不单独实现。
 
 ## PRD 相对 proposal 的新增/变更（diff gate 清单）
 
 全部 **additive**（裁决开放问题/细化），无对 proposal 决策的更改或删除：
 
-1. DB 接入形态定型：三驱动矩阵（sqlite/psycopg/pymysql，许可证切片 1 定案）、连接信息一次性内存语义、错误不回显密码、复用上传注册链路。
-2. 聚类合并交互定型：组卡片勾选 + 目标值可改 → 单个 mass-edit 经现有 operations 端点；默认聚类器以切片 0 实测定；高级参数仅 API。
-3. clusters 端点形态：`POST /api/datasets/:id/clusters`。
-4. 容器化取向：多阶段单镜像 + 构建期下载引擎（构建实验定）+ compose + /api/health 健康检查；docker 不可用则静态审查+记录未验证。
-5. 清偿五项的具体修法定型（含 TERM 落盘实验常驻化为契约测试）。
-6. PG/MySQL 真实服务验证口径：本机无服务则驱动级冒烟 + 文档标注（不虚构验证）。
+1. 哈希选型：@node-rs/argon2 优先（MIT/Apache-2），bcryptjs 回退——切片 0 定案。
+2. Session 形态：自研 HMAC-SHA256 签名 cookie（无服务端状态），TTL 7 天，登出=删 cookie（旧 cookie 至 exp 有效为已知接受边界）。
+3. 用户表/角色定型：admin|user 两级；**admin 对他人只读**（写仍 404）；无自助注册。
+4. owner 模型：datasets/pipelines 加列；runs/versions 经父表级联不加列。
+5. 存量迁移：setup 后幂等回填首管理员 + 迁移测试。
+6. 引擎旁路边界：应用层隔离声明进 UI 登录页与文档（网络级 M7）。
+7. 用户管理最小形态：API 端点（创建/停用/重置密码）+ 无专用 UI 页面（admin 经 curl/后续迭代）。

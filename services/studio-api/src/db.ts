@@ -12,6 +12,7 @@ export type { DatabaseSync };
 
 export interface DatasetRecord {
   id: number;
+  owner_id: number | null;
   name: string;
   file_hash: string;
   file_path: string;
@@ -58,6 +59,14 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
   comparison_json TEXT,
   output_version_id INTEGER
 );
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user',
+  disabled INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS dataset_versions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   dataset_id INTEGER NOT NULL,
@@ -81,6 +90,7 @@ export function openDb(dbPath: string): DatabaseSync {
 function rowToRecord(row: Record<string, unknown>): DatasetRecord {
   return {
     id: Number(row.id),
+    owner_id: row.owner_id === null || row.owner_id === undefined ? null : Number(row.owner_id),
     name: String(row.name),
     file_hash: String(row.file_hash),
     file_path: String(row.file_path),
@@ -99,11 +109,11 @@ export function insertDataset(
 ): DatasetRecord {
   const now = new Date().toISOString();
   const stmt = db.prepare(
-    `INSERT INTO datasets (name, file_hash, file_path, project_id, row_count, columns_json, created_at, profile_json, quality_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO datasets (owner_id, name, file_hash, file_path, project_id, row_count, columns_json, created_at, profile_json, quality_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const result = stmt.run(
-    rec.name, rec.file_hash, rec.file_path, rec.project_id, rec.row_count,
+    rec.owner_id ?? null, rec.name, rec.file_hash, rec.file_path, rec.project_id, rec.row_count,
     JSON.stringify(rec.columns), now,
     rec.profile ? JSON.stringify(rec.profile) : null,
     rec.quality ? JSON.stringify(rec.quality) : null,
@@ -138,6 +148,7 @@ export function updateReport(
 
 export interface PipelineRecord {
   id: number;
+  owner_id: number | null;
   dataset_id: number;
   name: string;
   recipe: unknown[];
@@ -177,9 +188,9 @@ export function insertPipeline(
   const now = new Date().toISOString();
   const r = db
     .prepare(
-      "INSERT INTO pipelines (dataset_id, name, recipe_json, interval_minutes, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO pipelines (owner_id, dataset_id, name, recipe_json, interval_minutes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
-    .run(rec.dataset_id, rec.name, JSON.stringify(rec.recipe), rec.interval_minutes, now);
+    .run(rec.owner_id ?? null, rec.dataset_id, rec.name, JSON.stringify(rec.recipe), rec.interval_minutes, now);
   return { ...rec, id: Number(r.lastInsertRowid), created_at: now };
 }
 
@@ -191,6 +202,7 @@ export function getPipeline(db: DatabaseSync, id: number): PipelineRecord | null
 function pipelineRow(row: Record<string, unknown>): PipelineRecord {
   return {
     id: Number(row.id),
+    owner_id: row.owner_id === null || row.owner_id === undefined ? null : Number(row.owner_id),
     dataset_id: Number(row.dataset_id),
     name: String(row.name),
     recipe: JSON.parse(String(row.recipe_json)),
@@ -355,4 +367,92 @@ export function failStaleRuns(db: DatabaseSync): number[] {
   );
   for (const row of stale) stmt.run(now, row.id);
   return stale.map((r) => r.id);
+}
+
+
+// ===== 用户（M6/U0）=====
+
+export interface UserRecord {
+  id: number;
+  username: string;
+  role: "admin" | "user";
+  disabled: boolean;
+  created_at: string;
+}
+
+export function userCount(db: DatabaseSync): number {
+  const r = db.prepare("SELECT COUNT(*) AS n FROM users").get() as { n: number };
+  return r.n;
+}
+
+export function insertUser(
+  db: DatabaseSync,
+  username: string,
+  passwordHash: string,
+  role: "admin" | "user" = "user",
+): UserRecord {
+  const now = new Date().toISOString();
+  const r = db
+    .prepare("INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)")
+    .run(username, passwordHash, role, now);
+  return { id: Number(r.lastInsertRowid), username, role, disabled: false, created_at: now };
+}
+
+export function getUserByName(db: DatabaseSync, username: string): (UserRecord & { password_hash: string }) | null {
+  const row = db
+    .prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE")
+    .get(username) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "user",
+    disabled: Number(row.disabled) === 1, created_at: String(row.created_at),
+    password_hash: String(row.password_hash),
+  };
+}
+
+export function getUser(db: DatabaseSync, id: number): UserRecord | null {
+  const row = db.prepare("SELECT * FROM users WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "user",
+    disabled: Number(row.disabled) === 1, created_at: String(row.created_at),
+  };
+}
+
+export function listUsers(db: DatabaseSync): Array<UserRecord> {
+  const rows = db.prepare("SELECT * FROM users ORDER BY id").all() as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "user",
+    disabled: Number(row.disabled) === 1, created_at: String(row.created_at),
+  }));
+}
+
+export function setUserDisabled(db: DatabaseSync, id: number, disabled: boolean): void {
+  db.prepare("UPDATE users SET disabled = ? WHERE id = ?").run(disabled ? 1 : 0, id);
+}
+
+export function resetUserPassword(db: DatabaseSync, id: number, passwordHash: string): void {
+  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(passwordHash, id);
+}
+
+/** 存量迁移（M6/U1，幂等）：owner 为 NULL 的业务行归属首管理员——setup 后调用。 */
+export function backfillOwnerToAdmin(db: DatabaseSync): number {
+  const admin = db
+    .prepare("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1")
+    .get() as { id: number } | undefined;
+  if (!admin) return 0;
+  let changed = 0;
+  for (const table of ["datasets", "pipelines"]) {
+    const has = db
+      .prepare(`SELECT COUNT(*) AS n FROM pragma_table_info('${table}') WHERE name = 'owner_id'`)
+      .get() as { n: number };
+    if (has.n === 0) {
+      db.prepare(`ALTER TABLE ${table} ADD COLUMN owner_id INTEGER`).run();
+    }
+    const r = db
+      .prepare(`UPDATE ${table} SET owner_id = ? WHERE owner_id IS NULL`)
+      .run(admin.id);
+    changed += Number(r.changes);
+  }
+  return changed;
 }

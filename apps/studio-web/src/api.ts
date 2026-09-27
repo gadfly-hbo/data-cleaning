@@ -52,7 +52,52 @@ export interface RowsPage {
   rows: unknown[][];
 }
 
+export interface AuthUser {
+  id: number;
+  username: string;
+  role: "admin" | "user";
+}
+
+export async function authStatus(): Promise<{ needs_setup: boolean }> {
+  return json<{ needs_setup: boolean }>(await fetch("/api/auth/setup-status"));
+}
+
+export async function setup(username: string, password: string): Promise<AuthUser> {
+  return json<AuthUser>(
+    await fetch("/api/auth/setup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }),
+  );
+}
+
+export async function login(username: string, password: string): Promise<AuthUser> {
+  return json<AuthUser>(
+    await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }),
+  );
+}
+
+export async function logout(): Promise<void> {
+  await fetch("/api/auth/logout", { method: "POST" });
+}
+
+export async function me(): Promise<AuthUser> {
+  return json<AuthUser>(await fetch("/api/auth/me"));
+}
+
 async function json<T>(res: Response): Promise<T> {
+  if (res.status === 401) {
+    // 会话过期/未登录：跳登录页（排除 auth 页自身避免循环）
+    if (!location.pathname.startsWith("/login") && !location.pathname.startsWith("/setup")) {
+      location.href = "/login";
+    }
+    throw new Error("未登录");
+  }
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
     throw new Error(body.error ?? body.message ?? `HTTP ${res.status}`);

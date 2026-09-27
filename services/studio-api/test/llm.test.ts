@@ -1,3 +1,4 @@
+import { setupAuth } from "./auth-helper.js";
 /** LLM 建议端点测试（Q4）：本地 stub 三形态（正常/非法输出/超时）+ 未配置态 + 边界。 */
 
 import { createServer, type Server } from "node:http";
@@ -29,6 +30,8 @@ let stubBaseUrl = "";
 
 let app: Awaited<ReturnType<typeof buildApp>>;
 let baseUrl = "";
+let authCookie = "";
+const authFetch = (u: string, init: RequestInit = {}) => fetch(u, { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), cookie: authCookie } });
 let datasetId = 0;
 
 beforeAll(async () => {
@@ -60,11 +63,13 @@ beforeAll(async () => {
   await app.listen({ port: 0, host: "127.0.0.1" });
   const a = app.server.address();
   if (typeof a === "object" && a) baseUrl = `http://127.0.0.1:${a.port}`;
+  authCookie = await setupAuth(baseUrl);
 
   // 直接造一个带画像的数据集行（绕过上传引擎链路——本测试焦点在 LLM 端点）
   const { openDb, insertDataset } = await import("../src/db.js");
   const db = openDb(path.join(WORKSPACE, "studio.db"));
   const rec = insertDataset(db, {
+    owner_id: 1,
     name: "llm-test",
     file_hash: "h",
     file_path: "/dev/null",
@@ -92,7 +97,7 @@ afterAll(async () => {
 });
 
 async function suggest(column = "city") {
-  return fetch(`${baseUrl}/api/datasets/${datasetId}/suggest`, {
+  return authFetch(`${baseUrl}/api/datasets/${datasetId}/suggest`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ column }),
@@ -100,7 +105,7 @@ async function suggest(column = "city") {
 }
 
 test("status exposes enabled/model/host without key", async () => {
-  const res = await fetch(`${baseUrl}/api/llm/status`);
+  const res = await authFetch(`${baseUrl}/api/llm/status`);
   expect(res.status).toBe(200);
   const status = (await res.json()) as { enabled: boolean; model: string; host: string };
   expect(status.enabled).toBe(true);
@@ -144,7 +149,7 @@ test("stub timeout yields 502", async () => {
 
 test("unknown column 404; bad body 400", async () => {
   expect((await suggest("nope")).status).toBe(404);
-  const res = await fetch(`${baseUrl}/api/datasets/${datasetId}/suggest`, {
+  const res = await authFetch(`${baseUrl}/api/datasets/${datasetId}/suggest`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: "{}",
@@ -179,11 +184,9 @@ test("disabled when unconfigured (fresh app without llm env)", async () => {
   const base2 = typeof a === "object" && a ? `http://127.0.0.1:${a.port}` : "";
   const status = (await (await fetch(`${base2}/api/llm/status`)).json()) as { enabled: boolean };
   expect(status.enabled).toBe(false);
+  // suggest 端点不在白名单：新库无用户=未登录 → 401（M6 语义正确）
   const res = await fetch(`${base2}/api/datasets/${datasetId}/suggest`, { method: "POST" });
-  const body = (await res.json()) as { enabled: boolean; hint?: string };
-  expect(res.status).toBe(200);
-  expect(body.enabled).toBe(false);
-  expect(body.hint).toContain("LLM_BASE_URL");
+  expect(res.status).toBe(401);
   await app2.close();
   Object.assign(process.env, previous);
 });
