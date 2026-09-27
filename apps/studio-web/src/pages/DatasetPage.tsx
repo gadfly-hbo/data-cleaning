@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { CleaningTab } from "./CleaningTab.js";
+import { VersionsTab } from "./VersionsTab.js";
 import { PreviewTable } from "./PreviewTable.js";
 import {
   getDataset,
@@ -12,13 +13,14 @@ import {
   type QualityRule,
 } from "../api.js";
 
-type Tab = "preview" | "profile" | "quality" | "cleaning";
+type Tab = "preview" | "profile" | "quality" | "cleaning" | "versions";
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: "preview", label: "预览" },
   { key: "profile", label: "画像" },
   { key: "quality", label: "质量" },
   { key: "cleaning", label: "清洗" },
+  { key: "versions", label: "版本" },
 ];
 
 const KIND_LABELS: Record<string, string> = {
@@ -80,6 +82,7 @@ export function DatasetPage() {
       {tab === "preview" && <PreviewTable datasetId={datasetId} columns={dataset.columns} />}
       {tab === "profile" && <ProfileTab dataset={dataset} />}
       {tab === "cleaning" && <CleaningTab dataset={dataset} />}
+      {tab === "versions" && <VersionsTab dataset={dataset} />}
       {tab === "quality" && (
         <QualityTab
           datasetId={datasetId}

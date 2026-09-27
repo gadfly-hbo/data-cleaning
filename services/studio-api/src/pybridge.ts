@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const PYBRIDGE_DIR = path.join(REPO_ROOT, "pybridge");
 const DEFAULT_PYTHON = path.join(PYBRIDGE_DIR, ".venv", "bin", "python");
-const TIMEOUT_MS = 120_000;
+const TIMEOUT_MS = 600_000; // 管道任务含引擎重放+双跑分，大文件余量（REVIEW 轮 1）
 
 export class PyBridgeExecutor {
   constructor(private readonly pythonBin: string = DEFAULT_PYTHON) {}

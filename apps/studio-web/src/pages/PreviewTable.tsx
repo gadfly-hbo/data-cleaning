@@ -3,18 +3,21 @@
 import { useEffect, useState } from "react";
 import { getRows, type RowsPage } from "../api.js";
 
-export function PreviewTable({ datasetId, columns }: { datasetId: number; columns: string[] }) {
+export function PreviewTable({ datasetId, columns, version }: { datasetId: number; columns: string[]; version?: number }) {
   const [page, setPage] = useState<RowsPage | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const limit = 50;
 
   useEffect(() => {
     setPage(null);
-    getRows(datasetId, offset, limit)
+    setError(null);
+    getRows(datasetId, offset, limit, version)
       .then(setPage)
-      .catch(() => setPage(null));
-  }, [datasetId, offset]);
+      .catch((e: Error) => setError(e.message));
+  }, [datasetId, offset, version]);
 
+  if (error) return <div className="empty">无法加载预览：{error}</div>;
   if (!page) return <div className="text-text-3">加载中…</div>;
 
   return (

@@ -1,38 +1,34 @@
-# M2 提案 — 交互式清洗工作台（讨论稿固定）
+# M3 提案 — 清洗管道（Recipe 定版 → 执行 → 调度 → 监控 → 质量对比）
 
-> 来源：M1 flow DONE 后（commit 1240a61），用户启动 `/dev-flow 开始 M2`，目标原文：
-> 「交互式清洗工作台（OpenRefine 操作经自研 UI 驱动、历史=操作记录、撤销/重放）」。
-> 规格上位源：docs/design.md v2（M2 行：自研 UI 驱动引擎转换，历史=引擎操作记录，撤销/重放；验收=业务人员可完成一次完整清洗并导出）。
-> M1 交付基础：adapters/openrefine 已有 applyOperations / getHistory / undoLast（一步）/ exportRowsCsv；studio-web 详情页三视图；studio-api 数据集链路。M1 移交项清单见 .flow/tasks.md（上一 flow 存档，git 历史 1240a61）。
+> 来源：M2 flow DONE 后（commit 409469f），用户启动 `/dev-flow 开始 M3`，目标原文：
+> 「清洗管道（Recipe 定版→Dagster 桥→调度→运行监控→清洗前后质量对比）」。
+> 规格上位源：docs/design.md v2（M3 行：Recipe 定版→管道：Dagster 桥、调度、运行监控、清洗前后质量对比；验收=工作台调好的流程能定时跑）。
+> M2 交付基础：Recipe 提取→回放闭环已实证（getOperations/apply-operations 契约测试常驻）；清洗五端点；工作台 UI。
 
-## 背景与既定决策（M2 不可重议，继承 design.md v2 / M0/M1）
+## 背景与既定决策（M3 不可重议，继承 design.md v2 / M0-M2）
 
-- 产品模式不变：自研 TS 壳 + adapter 隔离 + pybridge 子进程桥；UI 遵循全局 DESIGN.md（JuanerAI Xanthil）；许可证/依赖锁/workspace 纪律。
-- **操作直接作用于引擎项目**；操作历史=引擎操作记录（Recipe ≡ OpenRefine 操作历史 JSON 的核心机制在 M0 已实证）；预览天然实时（getRows 读引擎当前态）。
-- 撤销/重放走引擎 undo-redo 端点（lastDoneID 语义：回滚到该条为止）。
-- M2 单用户单实例；算子子集限定两类：**值替换（core/mass-edit）**、**文本变换（core/text-transform，内置 trim/大小写 + 自定义 GREL 输入）**。
-- 明确不做（记入 Out of Scope）：聚类去重 UI、facet、多列组合操作、reconciliation、GREL 之外的表达式语言、多用户并发。
-- 数据版本化（DatasetVersion 表/快照树）不在 M2：导出 CSV 即产物快照；版本化随 M3 管道引入（design.md 路线）。
+- 产品模式不变：TS 壳 + adapter 隔离 + pybridge；UI 遵循全局 DESIGN.md；许可证/依赖锁/workspace 纪律。
+- **管道 = Recipe 定版 + 绑定数据源 + 调度**（design.md 原文）；**Recipe ≡ OpenRefine 操作历史 JSON**（M2 实证可移植）。
+- **Dagster（Apache-2.0）为管道编排引擎，经 adapters/pipeline 桥接入**（design.md 目录结构预留）——集成深度是本 flow 的核心开放问题（见下）。
+- **数据不可变/版本化进入产品**（design.md 决策 2 明确"每次清洗/管道运行产出新版本"，M2 时推迟到 M3）：管道产物 = 数据集新版本（快照），原始与产物都以版本形式存在。
+- 清洗前后质量对比 = 同一规则集对 raw 与产物分别跑分（pybridge），报告 diff。
+- 单用户本地产品形态（M1/M2 既定）；M3 不做多用户/RBAC/远程部署。
 
-## M1 移交项的处置（纳入 M2 范围的部分）
+## M3 目标（本 flow 范围）
 
-- **孤儿引擎项目补偿**（correctness 债）：上传链路桥失败/入库失败时 deleteProject 回收——纳入 M2（小改动）。
-- **UI 打磨 3 条**（格式胶囊配色/等宽间距/对比度）：前端本来就要大改，顺手纳入。
-- **XLSX studio-api 全链路 e2e / Playwright 引入**：开放问题，PRD 决。
+设计验收：**工作台调好的清洗流程能定时跑**，且每次运行产出可追溯的版本与前后质量对比。组件：
 
-## M2 目标（本 flow 范围）
-
-业务人员在浏览器完成一次完整清洗并导出：
-
-1. `adapters/openrefine` 扩展：undoRedo 泛化（撤销/重做到任意历史点，lastDoneID 任意化）；`getOperations` 实测（提取 Recipe JSON，契约文档列为"已确认存在未实测"）；多步回滚/重做契约测试。
-2. `studio-api` 清洗端点：应用操作（POST）、历史读取（GET）、撤销/重做（POST，任意点）、导出（GET，CSV 流下载）；失败路径孤儿项目补偿。
-3. `studio-web` 工作台 UI：清洗操作面板（列选择 + 值替换映射 + 文本变换/GREL）、操作历史面板（past/future 列表、点击任意点回滚/重做）、导出按钮；预览 tab 实时反映清洗结果。
-4. UI 打磨与验收：浏览器端到端（上传→清洗→历史回滚→重做→导出）。
+1. **Pipeline 实体与定版**：从数据集详情页"把当前 Recipe 定版为管道"（绑定该数据集 + 快照操作 JSON）；管道可手动触发。
+2. **管道执行**：Recipe 重放到数据源（引擎建临时项目 → apply-operations → 导出产物快照）+ 前后质量跑分 + 产物版本落盘。执行路径经 Dagster 桥（集成深度待 PRD 决）。
+3. **调度**：管道可配置定时触发（单用户本地量级，形态待 PRD 决）。
+4. **运行监控**：运行记录（状态/耗时/前后报告/产物版本）列表与详情。
+5. **版本化**：数据集版本（最小模型：线性版本列表，不做 DAG 图谱 UI）。
+6. **前端**：管道管理页（创建/列表/运行历史/手动触发）+ 数据集详情的版本列表 + 质量对比视图。
 
 ## 开放问题（proposal 未定，留给 PRD/GRILL）
 
-- UI 形态：详情页加「清洗」tab（预览/画像/质量/清洗四 tab）vs 独立工作台路由（/datasets/:id/clean）。
-- 值替换映射的输入交互（列 top 值下拉多选→统一替换 vs 手输）。
-- 历史面板交互（列表项点击=回滚到该点 vs 撤销/重做按钮对）。
-- Recipe JSON 导出（下载操作历史，为 M3 管道铺路）是否进 M2。
-- Playwright e2e 是否 M2 引入。
+- **Dagster 集成深度**（本 flow 最重要决策）：A. 常驻 dagster-daemon + schedule（完整编排，运维重）；B. 进程内 Dagster job 物化（API 触发，studio-api 自带轻量定时器调度）；C. 完全自研执行（放弃 Dagster）。design.md 选 Dagster 的理由（成熟调度/重试/可观测）在 A 下才完整兑现，但 M3 单用户本地形态下 A 的常驻进程成本高。
+- 调度粒度形态（cron 表达式 vs 间隔分钟数）。
+- 版本模型最小形态（版本号规则、保留策略、是否引用 raw hash）。
+- 管道运行与引擎的并发关系（M1/M2 单引擎实例；管道运行与用户手动操作互斥？）。
+- 质量对比的呈现口径（逐规则 before→after 变化数）。

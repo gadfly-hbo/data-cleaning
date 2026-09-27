@@ -1,91 +1,93 @@
-# PRD — M2：交互式清洗工作台
+# PRD — M3：清洗管道（Recipe 定版 → 执行 → 调度 → 监控 → 质量对比）
 
 > 规格事实源：`.flow/proposal.md`（最高优先）。发布方式：无 issue tracker，写入 `.flow/prd.md`。
-> 红队：`.flow/red-team.md`（verdict go；切片 0 = 两条契约假设实测；前端以"操作后串行收敛"为设计约束）。
+> 红队：`.flow/red-team.md`（verdict go；Dagster 深度为第一决策；"执行闭环先于调度"为拆解铁律）。
+> ASSESS spike 事实（2026-09-27，pybridge venv 实测后已还原）：dagster 1.13.24 于 Python 3.14.4 可用（wheel 正常）；进程内 `execute_in_process()` 冷 4.5s（含导入）/热 0.03s；运行自带结构化事件（RUN_START/STEP_SUCCESS/RUN_SUCCESS + run_id）。
 
 ## Problem Statement
 
-M1 交付了只读诊断（画像/质量报告），但用户发现数据脏之后只能下载走人——清洗仍要回 Excel/OpenRefine 原版 UI。M2 要把"改数据"搬进自研产品壳：业务人员在浏览器里对选中列做替换/变换、随时回滚、完成后导出，全程不离开平台，且每一步都记录为可重放的操作历史（M3 管道的直接输入）。
+M2 让业务人员能在工作台手动清洗，但"调好的流程"无法复用：数据更新后要重做一遍同样的操作，也没有定时能力和运行留痕。M3 把 Recipe 变成可定版、可定时、可监控的管道：一键把工作台当前操作历史定版为管道，手动或按间隔自动重放，每次运行产出数据集新版本与清洗前后质量对比。
 
 ## Solution
 
-详情页新增「清洗」工作台 tab：操作面板（列选择 + 值替换/文本变换/GREL）+ 实时预览 + 操作历史面板（点击任意点回滚/重做）+ 导出按钮。操作经 studio-api 直达 OpenRefine 引擎，历史即引擎操作记录（Recipe），预览天然实时。
+管道实体（数据集绑定 + Recipe 快照 + 可选间隔调度）。执行路径为 pybridge 内的 Dagster job（进程内物化，直接驱动引擎重放 Recipe → 导出产物 → 前后质量跑分），studio-api 负责定版、触发、调度扫描与运行记录。产物成为数据集新版本，预览/导出与原始数据同构。
 
 ## User Stories
 
 业务分析人员（最终用户）：
 
-1. 作为业务分析人员，我要在数据集详情页进入清洗工作台并看到当前数据预览，以便在真实数据上决定清洗动作。
-2. 作为业务分析人员，我要对选中列做值替换（从该列高频值中多选旧值、输入一个新值），以便批量纠正同类脏值（如"广州市"→"广州"）。
-3. 作为业务分析人员，我要对选中列应用内置文本变换（去首尾空白/转大写/转小写），以便一键完成最常见的标准化。
-4. 作为业务分析人员，我要输入自定义 GREL 表达式做文本变换，以便表达内置项覆盖不了的规则。
-5. 作为业务分析人员，每次操作应用后预览要立即反映结果，以便确认操作效果再继续。
-6. 作为业务分析人员，我要看到操作历史（逐条描述、最新在前），以便知道我已经做了什么。
-7. 作为业务分析人员，我要点击历史中任意一条回滚到该点，以便撤销其后的一串操作。
-8. 作为业务分析人员，回滚后我要能重做（逐步或到某条），以便恢复误回滚。
-9. 作为业务分析人员，清洗完成后我要一键导出清洗后数据为 CSV，以便交付下游。
-10. 作为业务分析人员，坏操作（如非法 GREL）要得到明确错误且数据不被破坏，以便放心尝试。
+1. 作为业务分析人员，我要在数据集详情页把当前清洗操作历史一键定版为管道（命名），以便复用这套清洗流程。
+2. 作为业务分析人员，我要看到管道列表（名称/绑定数据集/调度/最近运行状态），以便管理我的管道。
+3. 作为业务分析人员，我要能手动触发一次管道运行并看到进行中/成功/失败状态。
+4. 作为业务分析人员，我要看到运行历史（每次的状态/耗时/错误信息），以便知道管道是否健康。
+5. 作为业务分析人员，我要看到某次运行的清洗前后质量对比（逐规则违规数 before→after 与变化），以便量化清洗价值。
+6. 作为业务分析人员，管道产物要成为数据集的新版本，可预览、可导出——与原始数据同一套体验。
+7. 作为业务分析人员，我要看到数据集的版本列表（raw 与各次管道产物，按时间），以便追溯每次产物来源。
+8. 作为业务分析人员，我要能给管道配置定时间隔（分钟），到点自动运行。
+9. 作为业务分析人员，源数据变化导致 Recipe 半途失败时，运行要如实记为失败且不产生半成品版本。
 
 平台开发者（我方）：
 
-11. 作为平台开发者，adapter 的 undo-redo 任意点语义与 getOperations 提取→回放闭环要有常驻契约测试，以便 M3 管道建立在实证契约上。
-12. 作为平台开发者，上传链路失败时要回收孤儿引擎项目（M1 移交债），以便引擎工作区不随失败累积。
-13. 作为平台开发者，全部清洗端点独立于前端可用（curl 走完 应用→历史→回滚→导出），以便 M3 管道复用同一 API。
-14. 作为平台开发者，Recipe（操作历史 JSON）可下载导出，以便手工备份与 M3 管道直接消费。
+10. 作为平台开发者，管道执行要以 Dagster job 形态运行并消费其结构化运行事件（run_id/步骤成败），以便执行语义与重试原语有工业级底座。
+11. 作为平台开发者，手动触发与调度触发必须共用同一条执行路径（curl 可触发全流程），以便行为一致可测。
+12. 作为平台开发者，数据集版本表结构要从一开始就不可变追加（append-only），以便血缘审计有据。
 
 ## Implementation Decisions
 
-- **UI 形态**：详情页第四 tab「清洗」（预览/画像/质量/清洗）——数据集上下文连续，复用 M1 页面结构；不建独立路由。
-- **操作面板**：列下拉选择（数据集列清单）；值替换=从画像 top 值多选旧值+新值输入；文本变换=内置三选一或 GREL 自由输入（预填 `value.trim()` 示例）；应用按钮在请求期间禁用（串行收敛约束）。
-- **历史面板**：past 倒序（最新在上）逐条 description；点击条目=回滚到该条（该条保留生效）；future 与 past 统一按时间线倒序混排（最新在上；审查裁决留痕），点击 future 条目=前滚到该条；另设「撤销一步」「重做一步」快捷按钮。
-- **API 端点**（studio-api，全部经 adapter）：
-  - `POST /api/datasets/:id/operations` body `{operations:[...]}` → 应用并返回最新历史
-  - `GET /api/datasets/:id/history` → `{past:[{id,description,time}],future:[...]}`
-  - `POST /api/datasets/:id/history/restore` body `{lastDoneID}` → 回滚/重做到该点（轮询收敛后返回最新历史）
-  - `GET /api/datasets/:id/export` → CSV 流下载（attachment 文件名 `<数据集名>.csv`）
-  - `GET /api/datasets/:id/recipe` → 操作历史 JSON 下载（getOperations 提取）
-- **adapter 扩展**：`undoRedo(projectId, lastDoneID)`（泛化，`undoLast` 改为其糖衣）、`getOperations(projectId)`（提取 Recipe）；契约测试：3 操作项目上的回滚/重做矩阵、提取→应用到同构新项目→数据一致。
-- **孤儿项目补偿**：上传链路在 insertDataset 前的任何失败（pybridge/引擎）→ `deleteProject` 回收（尽力而为，失败仅记日志）。
-- **UI 打磨**（M1 移交 3 条顺手做）：格式类违规胶囊统一用 warn 语义配色；mono 数字 tabular-nums 间距；次级文字对比度微调。
-- **文本变换列约束**：仅字符串列（引擎会拒绝非字符串列的 str 类 GREL，前端先按画像 dtype 过滤列下拉）。
+- **Dagster 集成深度 = 方案 B（本 PRD 第一决策，经 spike 实证）**：管道 job 以 dagster 定义、`execute_in_process()` 进程内物化；**不引入 dagster-daemon/dagit 常驻进程**——调度由 studio-api 内置间隔扫描承担，daemon 常驻推迟到多用户/生产化阶段（M4）再评估。这是 design.md v2"Dagster 桥"的执行深度细化（非选型更换），偏差记录在案。
+- **adapters/pipeline 的落地形态**：pybridge 内新增 `pipeline` 模块（dagster job 定义 + 引擎直连）。管道执行步骤：建临时引擎项目（直连 127.0.0.1:3333，引擎由 studio-api 惰性托管）→ apply Recipe → 导出产物到 workspace → 进程内 pybridge 跑分（before=源文件, after=产物）→ 输出结构化结果 JSON。studio-api 经一次性子进程调用（同 M1 桥模式）。
+- **数据模型（SQLite 追加式）**：
+  - `pipelines(id, dataset_id, name, recipe_json, interval_minutes NULL, created_at)`
+  - `pipeline_runs(id, pipeline_id, status running|ok|fail, dagster_run_id, started_at, finished_at NULL, error NULL, before_quality_json, after_quality_json, output_version_id NULL)`
+  - `dataset_versions(id, dataset_id, version, kind raw|pipeline, file_path, source_run_id NULL, rows, created_at)`；上传时写 raw 版 v1；管道产物追加新版本号。
+- **API 端点**：`POST /api/pipelines`（定版：dataset_id+name+interval?，服务端快照当前 recipe）、`GET /api/pipelines`（含最近运行态）、`POST /api/pipelines/:id/trigger`、`GET /api/pipelines/:id/runs`、`GET /api/runs/:id`（含前后报告与产物版本）、`GET /api/datasets/:id/versions`；产物版本的预览/导出复用现有 rows/export 端点（按 version 查询参数路由到对应文件）。
+- **调度器**：studio-api 内每 30s 扫描 `interval_minutes` 到期的管道并触发；同一管道串行（前一运行未结束不重复触发）；进程重启后按 last run 时间重算（不补偿错过的多次，只补跑一次）。
+- **质量对比口径**：默认规则集（G8）分别对源文件与产物跑分，逐规则输出 `{kind, column, before, after, delta}`，汇总违规总数变化。
+- **引擎并发**：管道运行使用独立临时引擎项目，与用户手动工作台操作天然隔离（引擎按项目隔离）；运行结束删除临时项目（复用 M2 孤儿回收路径）。
+- **前端**：侧栏新增「管道」分组（管道列表页：创建入口在数据集详情「定版为管道」对话框式内联表单）；管道详情=运行历史列表；运行详情=前后质量对比表（语义色标注改善/恶化）+ 产物版本跳转；数据集详情新增「版本」区块（版本列表，点击切换预览）。
 
 ## Testing Decisions
 
-- 只测外部行为；seam 不变（HTTP / CLI / adapter client 公共接口 + fetch 边界组件测试）。
-- adapter：回滚/重做矩阵契约测试（3 操作 × 回滚到 1 → 断言数据+历史 → 重做到 3 → 断言）；提取→回放闭环测试。
-- studio-api：清洗端点集成测试（应用→历史→回滚→重做→导出内容断言「广州市」已清洗；坏 GREL → 500 结构化且历史不变；孤儿回收断言项目计数不增）。
-- studio-web：工作台组件测试（面板渲染、操作分发 fetch 体断言、历史点击调用 restore、请求期间按钮禁用）。
-- 浏览器手动端到端验收（上传→替换→变换→回滚→重做→导出）记录进 tasks.md；**Playwright e2e 不进 M2**（M3 引入）。
+- 只测外部行为；seam 扩展：pybridge 新增 `pipeline` 任务的 CLI 协议 seam + studio-api 管道端点 HTTP seam。
+- pybridge：`task=pipeline` 端到端测试（临时引擎项目 + messy 夹具 + 两步 Recipe → 产物文件内容断言清洗生效 + before/after 报告计数为已知字面量）；源数据列缺失 → 结构化失败、无产物文件。
+- studio-api：定版→触发→轮询运行态 ok→版本列表出现产物→对比报告字段完整；坏 Recipe → run=fail + error 如实 + 版本数不变；调度扫描函数的单元级测试（到期判定/串行约束，注入时钟）。
+- studio-web：管道列表/运行对比组件测试（fetch 边界）；定版表单分发断言。
+- 浏览器手动端到端（定版→触发→对比→版本预览）记录进 tasks.md。
 
 ## Out of Scope
 
-- 聚类去重 UI（compute-clusters）、facet 过滤、多列组合操作、reconciliation、GREL 之外表达式。
-- DatasetVersion 版本表/快照树（M3 随管道引入）；多用户并发；引擎实例池。
-- OpenRefine 原版 UI 的任何嵌入或复刻。
+- dagster-daemon/dagit 常驻与远程运行器（M4 生产化评估）；cron 表达式调度（M4，M3 仅间隔分钟）。
+- 版本 DAG 图谱 UI（M3 仅线性列表）；版本保留策略/清理。
+- 多用户、RBAC、通知/告警通道；失败自动重试策略配置（M3 失败即如实记录）。
+- 管道编辑器（改已定版 Recipe——重新定版即可）；跨数据集管道。
 
 ## Further Notes
 
-- 切片 0 的 getOperations 闭环若实测失败：裁掉 story 14（Recipe 下载）与 recipe 端点，M3 改走"记录用户操作原始 JSON"路线，其余不受影响。
-- 导出与预览一致反映当前（可能已回滚的）引擎状态——所见即所得。
-
-## PRD 相对 proposal 的新增/变更（diff gate 清单）
-
-全部 **additive**（裁决开放问题/细化），无对 proposal 决策的更改或删除：
-
-1. UI 形态裁决：详情页第四 tab「清洗」（非独立路由）。
-2. 值替换交互裁决：画像 top 值多选旧值 + 新值输入。
-3. 历史交互裁决：列表点击任意点回滚/重做 + 撤销/重做一步快捷按钮。
-4. Recipe JSON 下载进 M2（story 14），以切片 0 getOperations 闭环通过为前提。
-5. Playwright e2e 不进 M2（M3 引入），维持组件测试+手动浏览器验收。
-6. 清洗 API 五端点形态明确（operations/history/restore/export/recipe）。
-7. 文本变换限字符串列（画像 dtype 过滤）；UI 打磨 3 条具体化。
+- 熔断保底切片 = 「定版 + 手动触发执行 + 版本产物 + 对比视图」（无调度）；调度切片独立在后。
+- dagster 冷启动 4.5s 对管道运行无感（异步运行态轮询）；pybridge 的 dagster 依赖进入 uv.lock（~90 传递依赖，许可证均为 Apache-2/MIT 系，逐项抽查在切片内完成）。
 
 ## GRILL 决议（自答，2026-09-27）
 
 零升级（全部实现细节级，有可辩护推荐）：
 
-- **H1 restore 收敛判据**：POST undo-redo 前先 getHistory 定位 lastDoneID 的目标位置（past 中该条序+1，或 future 前滚目标），POST 后轮询 get-history 直到 `past.length` 达标或 30s 超时——复用 M0 undoLast 已验证的轮询模式。
-- **H2 值替换旧值来源**：默认从画像 top_values 多选，允许手动补输自定义旧值（画像缺失的旧数据集也有出路）。
-- **H3 预览复用**：抽取 M1 PreviewTab 为共享组件，清洗 tab 内嵌同款分页预览（单一实现，两处使用）。
-- **H4 坏 GREL 行为**：切片 0 顺带实测（apply-operations 对非法表达式的响应形态），集成测试断言「结构化错误 + 历史不变」。
-- **H5 UI 打磨落点**：格式类（regex）违规胶囊统一 chip-warn；数字列已 tabular-nums，补 top 值胶囊内数字对齐；meta 级文字（10.5px）在白底场景统一用 text-2 而非 text-3。
+- **J1 pybridge 侧引擎客户端**：urllib 零依赖 mini client（create/apply/export/delete 四端点 + CSRF 查询参数），契约由 pybridge 端到端测试钉住；与 TS client 的双语言漂移风险由"两份契约测试钉同一引擎契约文档"缓解（契约文档是单一事实源）。
+- **J2 产物路径**：`workspace/versions/<dataset_id>/` 下追加。原定 v<n>.csv，实现为 **run-<runId>.csv**（REVIEW 轮 1 回签：runId 天然唯一，规避并发版本号覆盖；DB 层仍按 MAX(version)+1 赋版本号，UNIQUE 兜底）；不做内容寻址（同内容也是新版本，append-only 语义）。
+- **J3 触发异步模型**：POST trigger 立即返回 run id（status=running）；studio-api fire-and-forget spawn pybridge，完成回写 run/版本；调度与手动共用此路径。
+- **J4 pipeline 任务协议**：stdin `{task:"pipeline", file, recipe, out_path, engine_url}` → stdout `{status:"ok"|"fail", dagster_run_id, output_file?, rows?, quality?:{before,after,comparison}, error?}`；业务失败（Recipe 失败）= exit 0 + status:fail，仅执行异常才非零退出（studio-api 据此区分 run 状态与桥故障）。【REVIEW 轮 1 回签：原草案的 steps 字段无消费方，协议以实现为准移除】
+- **J5 版本预览与导出**：版本 rows 不进引擎——pybridge 新增 `task=rows`（polars 分页读版本文件）；版本导出直接文件流（sendFile，零解析）。工作台实时预览仍走引擎（现状不变）。
+- **J6 定版表单默认值**：名称 `<dataset名>-pipeline`；interval 可空=仅手动。
+- **J7 对比表 UI**：行=规则（kind+column），列=before/after/delta；delta<0 改善用 ok 色、>0 恶化用 fail 色、=0 中性；顶部汇总违规总数变化。
+- **J8 pybridge 引擎测试自包含**：pipeline 端到端测试自行 spawn/回收引擎（复刻 engine.ts 逻辑 ~20 行），与 TS 契约测试行为同款。
+
+## PRD 相对 proposal 的新增/变更（diff gate 清单）
+
+全部 **additive**（裁决开放问题/落地细节），其中第 1 条是对 design.md 执行深度的明示细化（非 proposal 决策更改）：
+
+1. **Dagster 集成深度裁决为 B**：进程内物化 + studio-api 内置间隔调度；不引入 daemon/dagit（spike 实证支撑；daemon 常驻 M4 再评估）。
+2. 执行编排在 pybridge 侧 dagster job（直连引擎 3333；studio-api 只管定版/触发/调度/记录）——adapters/pipeline 的具体落地形态。
+3. 调度形态：间隔分钟数 + 30s 扫描 + 同管道串行 + 重启只补跑一次（cron/补偿策略 M4）。
+4. 版本模型最小形态：dataset_versions 线性追加（kind raw|pipeline），无 DAG UI、无保留策略。
+5. 质量对比口径：默认规则集逐规则 before/after/delta + 汇总。
+6. API 端点七个定型；产物预览/导出经 version 参数复用现有端点。
+7. 引擎并发模型：管道用独立临时项目（与手动操作天然隔离），结束即删。
+8. 前端形态：侧栏「管道」分组 + 定版内联表单 + 运行对比表 + 数据集版本区块。

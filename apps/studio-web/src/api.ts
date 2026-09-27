@@ -77,8 +77,9 @@ export async function getDataset(id: number): Promise<DatasetSummary> {
   return json<DatasetSummary>(await fetch(`/api/datasets/${id}`));
 }
 
-export async function getRows(id: number, offset: number, limit: number): Promise<RowsPage> {
-  return json<RowsPage>(await fetch(`/api/datasets/${id}/rows?offset=${offset}&limit=${limit}`));
+export async function getRows(id: number, offset: number, limit: number, version?: number): Promise<RowsPage> {
+  const v = version !== undefined ? `&version=${version}` : "";
+  return json<RowsPage>(await fetch(`/api/datasets/${id}/rows?offset=${offset}&limit=${limit}${v}`));
 }
 
 export async function revalidateRules(id: number): Promise<QualityReport> {
@@ -145,10 +146,86 @@ async function download(id: number, suffix: string, fallbackName: string): Promi
   URL.revokeObjectURL(url);
 }
 
-export function exportCsv(id: number, name: string): Promise<void> {
-  return download(id, "export", `${name}.csv`);
+export function exportCsv(id: number, name: string, version?: number): Promise<void> {
+  const suffix = version !== undefined ? `export?version=${version}` : "export";
+  return download(id, suffix, `${name}${version !== undefined ? `.v${version}` : ""}.csv`);
 }
 
 export function downloadRecipe(id: number, name: string): Promise<void> {
   return download(id, "recipe", `${name}.recipe.json`);
+}
+
+// ===== 管道与版本（M3）=====
+
+export interface Pipeline {
+  id: number;
+  dataset_id: number;
+  name: string;
+  recipe: unknown[];
+  interval_minutes: number | null;
+  created_at: string;
+  last_run?: { status: string } | null;
+}
+
+export interface PipelineRun {
+  id: number;
+  pipeline_id: number;
+  status: "running" | "ok" | "fail";
+  dagster_run_id: string | null;
+  started_at: string;
+  finished_at: string | null;
+  error: string | null;
+  quality: {
+    before: QualityReport | null;
+    after: QualityReport | null;
+    comparison: Array<{ kind: string; column: string; before: number; after: number; delta: number }>;
+  } | null;
+  output_version: { version: number; kind: string; rows: number } | null;
+}
+
+export interface DatasetVersion {
+  version: number;
+  kind: "raw" | "pipeline";
+  rows: number;
+  source_run_id: number | null;
+  created_at: string;
+}
+
+export async function createPipeline(input: {
+  dataset_id: number;
+  name: string;
+  interval_minutes?: number | null;
+}): Promise<Pipeline> {
+  return json<Pipeline>(
+    await fetch("/api/pipelines", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+export async function listPipelines(): Promise<Pipeline[]> {
+  const data = await json<{ pipelines: Pipeline[] }>(await fetch("/api/pipelines"));
+  return data.pipelines;
+}
+
+export async function triggerPipeline(id: number): Promise<{ run_id: number }> {
+  return json<{ run_id: number }>(await fetch(`/api/pipelines/${id}/trigger`, { method: "POST" }));
+}
+
+export async function listRuns(id: number): Promise<PipelineRun[]> {
+  const data = await json<{ runs: PipelineRun[] }>(await fetch(`/api/pipelines/${id}/runs`));
+  return data.runs;
+}
+
+export async function getRun(id: number): Promise<PipelineRun> {
+  return json<PipelineRun>(await fetch(`/api/runs/${id}`));
+}
+
+export async function listVersions(datasetId: number): Promise<DatasetVersion[]> {
+  const data = await json<{ versions: DatasetVersion[] }>(
+    await fetch(`/api/datasets/${datasetId}/versions`),
+  );
+  return data.versions;
 }

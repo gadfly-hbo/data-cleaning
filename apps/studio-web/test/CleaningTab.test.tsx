@@ -175,6 +175,45 @@ test("operation failure is disclosed without breaking state", async () => {
   expect(screen.getByTestId("apply-button")).toBeDefined(); // 面板仍在，可重试
 });
 
+test("promote form submits pipeline with name and interval", async () => {
+  stubFetch((url) => defaultHandler(url));
+  // 在全局桩之上仅拦截定版 POST，捕获请求体
+  let promoteBody: unknown = null;
+  const baseFetch = globalThis.fetch;
+  vi.stubGlobal(
+    "fetch",
+    async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/pipelines") && init?.method === "POST") {
+        promoteBody = JSON.parse(String(init.body));
+        return new Response(
+          JSON.stringify({ id: 9, dataset_id: 7, name: "我的管道", recipe: [], interval_minutes: 30, created_at: "x" }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      return baseFetch(input as string, init);
+    },
+  );
+
+  render(<CleaningTab dataset={dataset} />);
+  await screen.findByText("清洗操作");
+  await waitFor(
+    () => expect((screen.getByTestId("promote-button") as HTMLButtonElement).disabled).toBe(false),
+    { timeout: 2000 },
+  );
+  fireEvent.change(screen.getByTestId("promote-name"), { target: { value: "我的管道" } });
+  fireEvent.change(screen.getByTestId("promote-interval"), { target: { value: "30" } });
+  fireEvent.click(screen.getByTestId("promote-button"));
+
+  await screen.findByText(/已定版/);
+  expect(promoteBody).toEqual({ dataset_id: 7, name: "我的管道", interval_minutes: 30 });
+
+  // 负例：非整数间隔被拒绝并提示（REVIEW 轮 2 建议）
+  fireEvent.change(screen.getByTestId("promote-interval"), { target: { value: "abc" } });
+  fireEvent.click(screen.getByTestId("promote-button"));
+  await screen.findByText(/间隔必须是正整数分钟/);
+});
+
 test("refresh failure after successful apply says operation took effect", async () => {
   // 审查轮 2 建议：操作成功但历史刷新失败时，文案必须如实（操作已生效），不得再说数据未被破坏
   vi.stubGlobal(

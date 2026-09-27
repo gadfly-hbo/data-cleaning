@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   applyOperations,
+  createPipeline,
   downloadRecipe,
   exportCsv,
   getHistory,
@@ -33,6 +34,10 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<History | null>(null);
   const [previewKey, setPreviewKey] = useState(0); // 操作后强制刷新预览
+  const [promoteName, setPromoteName] = useState(`${dataset.name}-pipeline`);
+  const [promoteInterval, setPromoteInterval] = useState("");
+  const [promoted, setPromoted] = useState<string | null>(null);
+  const [promoteError, setPromoteError] = useState<string | null>(null);
 
   // 操作面板状态
   const [column, setColumn] = useState("");
@@ -125,6 +130,28 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
       await applyOperations(dataset.id, operations);
       resetForm(); // 操作已生效才清表单
     });
+  }
+
+  async function promote() {
+    setBusy(true);
+    setPromoteError(null);
+    try {
+      const trimmed = promoteInterval.trim();
+      if (trimmed !== "" && !Number.isInteger(Number(trimmed))) {
+        throw new Error("间隔必须是正整数分钟（留空为手动）");
+      }
+      const interval = trimmed === "" ? null : Number(trimmed);
+      const pipeline = await createPipeline({
+        dataset_id: dataset.id,
+        name: promoteName.trim() || `${dataset.name}-pipeline`,
+        interval_minutes: interval,
+      });
+      setPromoted(pipeline.name);
+    } catch (err) {
+      setPromoteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function restore(lastDoneID: number) {
@@ -329,6 +356,53 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
               <HistoryRow key={e.id} entry={e} state={i === 0 ? "latest" : "past"} busy={busy} onClick={() => void restore(e.id)} />
             ))}
           </div>
+        )}
+      </div>
+
+      <div className="card p-3.5" data-testid="promote-panel">
+        <div className="flex items-center gap-2 mb-2.5">
+          <span className="font-semibold">定版为管道</span>
+          <span className="text-text-2 text-[11.5px]">
+            把当前操作历史（{history?.past.length ?? 0} 步）快照为可重放、可定时的管道
+          </span>
+        </div>
+        <div className="flex items-end gap-2.5 flex-wrap max-w-[560px]">
+          <label className="grid gap-1">
+            <span className="text-text-2 text-[11.5px]">管道名称</span>
+            <input
+              className="border border-border rounded-sm bg-surface px-2 py-1.5 text-[13px]"
+              value={promoteName}
+              disabled={busy}
+              onChange={(e) => setPromoteName(e.target.value)}
+              data-testid="promote-name"
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-text-2 text-[11.5px]">间隔（分钟，留空=手动）</span>
+            <input
+              className="border border-border rounded-sm bg-surface px-2 py-1.5 text-[13px] mono w-32"
+              value={promoteInterval}
+              disabled={busy}
+              onChange={(e) => setPromoteInterval(e.target.value)}
+              placeholder="手动"
+              data-testid="promote-interval"
+            />
+          </label>
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={busy || !history?.past.length}
+            onClick={() => void promote()}
+            data-testid="promote-button"
+          >
+            定版
+          </button>
+        </div>
+        {promoted && (
+          <div className="chip chip-ok mt-2.5">已定版（{promoted}）——到「管道」页运行它</div>
+        )}
+        {promoteError && (
+          <div className="card p-2.5 bg-fail-soft border-fail-line text-fail mt-2.5">{promoteError}</div>
         )}
       </div>
 
