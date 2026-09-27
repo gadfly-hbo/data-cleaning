@@ -1,44 +1,39 @@
-# Red-Team: M6 — 多用户基础（认证 + 数据隔离）
+# Red-Team: M7 — 细粒度 RBAC + 引擎端口隔离 + 审计日志 + 债清偿
 
-> 评审对象：`.flow/proposal.md`。日期：2026-09-27。结论：**go**——认证选型与 owner 迁移是两个必测假设；范围裁剪（地基而非全 RBAC）方向正确。
+> 评审对象：`.flow/proposal.md`。日期：2026-09-27。结论：**go**——三个技术假设（端口随机化/权限矩阵迁移/审计写入时机）需在切片内实测。
 
 ## Top Kill-Assumptions（按 影响×看错概率×测试成本 排序）
 
-### 1. 认证选型在 Node 25 + 无外部服务下可闭环
-- **Claim**: 签名 cookie session + argon2/bcrypt 哈希可在现有依赖栈内实现完整登录流。
-- **Steelman**: 单机产品无外部依赖需求；fastify cookie 插件成熟；@node-rs/argon2（Rust binding，Apache-2/MIT）或 bcryptjs（纯 JS，BSD）都是常见选择。
-- **Fails if**: 所选哈希库在 Node 25 arm64 无预编译产物且本地编译失败 → 切纯 JS bcryptjs（性能差但可用）。
-- **Kill criterion**: 两个候选都不可用（几乎不可能）→ 自研 PBKDF2（node:crypto 内置，无需第三方）。
-- **Cheapest test**: uv/npm 试装 + 哈希 roundtrip（切片 0）。
+### 1. OpenRefine `-p 0` 能让 OS 分配随机端口且健康探测可发现
+- **Claim**: refine 脚本传 `-p 0` → Jetty 绑定临时端口 → Java 侧日志/系统属性暴露实际端口。
+- **Steelman**: Jetty connector `setPort(0)` 标准 Java ServerSocket 行为；引擎启动日志含 "Starting Server bound to http://127.0.0.1:<port>"。
+- **Fails if**: refine 脚本或引擎侧拒绝端口 0 / 日志不暴露实际端口 → 退化为"端口范围随机"（如 30000-60000 随机选一个可用）。
+- **Kill criterion**: 两种方式都不可行 → 固定端口维持（接受已知边界，记录）。
+- **Cheapest test**: 切片 0 curl 实测。
 
-### 2. owner 隔离在既有数据模型上可无损落地
-- **Claim**: datasets/pipelines/runs/versions 加 owner 字段 + 全端点校验 = 完整隔离。
-- **Steelman**: 表结构简单（5 张业务表），全部端点集中在 app.ts，中间件 + 每查询过滤即可。
-- **Fails if**: 引擎项目（OpenRefine project_id）成为旁路——非 owner 若能通过引擎 API 直接操作（3333 端口本机可直连，无鉴权！）。**这是最实质的风险**：任何本机进程可绕过 studio-api 直打引擎。M6 的隔离是应用层隔离，引擎网络隔离（127.0.0.1 + 随机端口/Unix socket）是否纳入？
-- **Kill criterion**: 若要求网络级隔离，范围膨胀明显（引擎 socket 化是 M7 工作）；M6 明确声明"应用层隔离，本机进程可直连引擎是已知边界"。
-- **Cheapest test**: 明确边界声明 + 文档记录。
+### 2. M6 的 owner 隔离语义可无损迁移到三级角色矩阵
+- **Claim**: visible/writable 守卫改为 role→权限矩阵查表（viewer 读 / editor 写自己 / admin 全见+管理），M6 测试经少量角色参数调整即兼容。
+- **Steelman**: 守卫集中（visibleDataset/writableDataset 等函数），改动面收敛；M6 的 isolation.test 可扩展为角色矩阵驱动。
+- **Fails if**: admin 语义变化（"他人只读" → "admin 可管理管道调度但不能编辑他人数据集"）导致 M6 测试大面积翻新——需要仔细映射每个端点。
+- **Kill criterion**: 矩阵设计有不可调和的语义冲突 → 保留 M6 admin 只读语义，新增 editor 为中间层（最小破坏）。
 
-### 3. 存量数据迁移零丢失
-- **Claim**: 现有 datasets（测试库+用户库）迁移加 owner 后全部可见。
-- **Fails if**: 存量行 owner 为 NULL → 任何人都看不见（数据"消失"）。
-- **Kill criterion**: 迁移策略必须给存量行显式归属（首管理员）+ 迁移测试。
-
-### 4. 一轮预算（前五轮每轮 2-3 轮审查）
-- **Fails if**: 认证细节（cookie flags/TTL/csrf）膨胀。
-- **Kill criterion**: 熔断保底 =「认证 + 隔离 + 存量迁移」；文档项独立可弃。
+### 3. 审计日志的写入不破坏请求延迟与事务一致性
+- **Claim**: 同步 SQLite 写（每请求一条 INSERT，几毫秒）对本地单机产品无感。
+- **Fails if**: 写入失败导致业务请求失败（审计不应阻断业务）→ best-effort + 失败记 stderr 不影响响应。
+- **Cheapest test**: 集成测试断言审计行存在 + 业务 200 并行。
 
 ## What's Well-Reasoned
 
-- "地基而非全 RBAC"裁剪与 M4/M5 同模式（承诺债优先、一轮可交付）。
-- 引擎旁路风险被主动识别（本机 3333 无鉴权）而非假装不存在——边界声明是正确处理。
-- 封闭式用户创建（管理员建号）对本地单机产品合理，注册开放确需产品决策。
-- M5 移交项全部有去向（做/记录/环境限制标注）。
+- 三项功能（RBAC/端口隔离/审计）构成"平台化收尾"自然组合——M6 地基的安全加固层。
+- 引擎随机端口从根源消除本机旁路（比仅文档声明更实质）。
+- 审计 append-only 无清理——最简单最安全（可变审计比无审计更危险）。
+- M6 债五条全部具体小项。
 
 ## What I Couldn't Assess
 
-- 用户预期的并发用户数（2-5 人本地 vs 更多——影响 session TTL 与引擎资源竞争模型，M6 不深究）。
-- 是否有远程访问诉求（当前"本地单机维持"是推断——design.md 未明示网络暴露意图）。
+- refine 脚本 `-p 0` 传递链路是否被中间层归一化（需实测）。
+- 审计日志在多用户高频操作下的增长速率（本地产品影响有限）。
 
 ## 净结论
 
-go。切片 0 = 哈希选型试装 + 签名 cookie roundtrip；引擎旁路边界写进 proposal 的 PRD 并在 UI/文档声明；存量迁移有测试。
+go。切片 0 = 端口随机化 spike（curl 实测）；RBAC 迁移以 M6 isolation.test 为基准扩展；审计 best-effort 不阻断。

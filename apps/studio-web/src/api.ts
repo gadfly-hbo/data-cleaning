@@ -55,7 +55,7 @@ export interface RowsPage {
 export interface AuthUser {
   id: number;
   username: string;
-  role: "admin" | "user";
+  role: "admin" | "editor" | "viewer";
 }
 
 export async function authStatus(): Promise<{ needs_setup: boolean }> {
@@ -331,11 +331,18 @@ export interface LineageVersion {
   run: LineageRun | null;
 }
 
-export async function getLineage(datasetId: number): Promise<LineageVersion[]> {
-  const data = await json<{ versions: LineageVersion[] }>(
+export interface AuditEvent {
+  ts: string;
+  username: string;
+  action: string;
+}
+
+export async function getLineage(
+  datasetId: number,
+): Promise<{ versions: LineageVersion[]; recent_audit?: AuditEvent[] }> {
+  return json<{ versions: LineageVersion[]; recent_audit?: AuditEvent[] }>(
     await fetch(`/api/datasets/${datasetId}/lineage`),
   );
-  return data.versions;
 }
 
 export interface LlmStatus {

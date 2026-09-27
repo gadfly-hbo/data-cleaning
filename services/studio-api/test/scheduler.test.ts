@@ -19,8 +19,7 @@ let db: DatabaseSync;
 
 beforeEach(() => {
   db = openDb(path.join(mkdtempSync(path.join(tmpdir(), "sched-")), "s.db"));
-  // 测试库直接建列（生产路径经 setup 的 backfillOwnerToAdmin 迁移）
-  db.exec("ALTER TABLE pipelines ADD COLUMN owner_id INTEGER");
+  // V5-⑤：新 DDL 已含 owner_id 列
 });
 
 afterAll(() => {

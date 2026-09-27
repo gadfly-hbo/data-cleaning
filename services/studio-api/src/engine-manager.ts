@@ -1,7 +1,6 @@
 /** OpenRefine 引擎生命周期托管：惰性启动、单实例、随 app 关闭回收。 */
 
 import {
-  ENGINE_PORT,
   OpenRefineClient,
   startEngine,
   stopEngine,
@@ -38,7 +37,7 @@ export class EngineManager {
         throw err;
       }
     }
-    return new OpenRefineClient(ENGINE_PORT);
+    return new OpenRefineClient(this.handle!.port); // ensureEngine 成功后 handle 非空
   }
 
   async stop(): Promise<void> {
@@ -59,5 +58,10 @@ export class EngineManager {
 
   get running(): boolean {
     return this.handle !== null;
+  }
+
+  /** 当前引擎端口（M7：随机化——未启动时 0）。 */
+  get port(): number {
+    return this.handle?.port ?? 0;
   }
 }

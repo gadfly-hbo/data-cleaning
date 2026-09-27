@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { buildApp } from "../src/app.js";
-import { OpenRefineClient, ENGINE_PORT } from "@data-cleaning/adapter-openrefine";
+import { OpenRefineClient } from "@data-cleaning/adapter-openrefine";
 
 const FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -47,7 +47,7 @@ beforeAll(async () => {
   if (typeof addr === "object" && addr) baseUrl = `http://127.0.0.1:${addr.port}`;
   else throw new Error("no address");
   authCookie = await setupAuth(baseUrl);
-  engineClient = new OpenRefineClient(ENGINE_PORT);
+  // M7：动态端口——延迟到 orphan 测试内创建（引擎此时已被前面的测试启动）
 
   const form = new FormData();
   form.append("file", new File([readFileSync(FIXTURE)], "messy-small.csv", { type: "text/csv" }));
@@ -198,6 +198,11 @@ test("orphan engine project reclaimed on bridge failure upload", async () => {
   const addr = brokenApp.server.address();
   const brokenUrl = typeof addr === "object" && addr ? `http://127.0.0.1:${addr.port}` : "";
 
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const portFile = resolve(import.meta.dirname, "../../../workspace/.engine-port");
+  const enginePort = parseInt(readFileSync(portFile, "utf-8").trim(), 10);
+  engineClient = new OpenRefineClient(enginePort);
   const before = await engineClient.listProjectIds();
 
   const form = new FormData();

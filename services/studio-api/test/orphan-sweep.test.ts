@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { buildApp } from "../src/app.js";
-import { OpenRefineClient, ENGINE_PORT, startEngine, stopEngine, type EngineHandle } from "@data-cleaning/adapter-openrefine";
+import { OpenRefineClient, startEngine, stopEngine, type EngineHandle } from "@data-cleaning/adapter-openrefine";
 
 const FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -15,7 +15,7 @@ const FIXTURE = path.resolve(
 const WORKSPACE = mkdtempSync(path.join(tmpdir(), "studio-sweep-"));
 
 /**
- * 环境敏感编排（共享 3333 引擎），SWEEP=1 显式跑。清扫正确性证据链：
+ * 环境敏感编排（M7 起端口随机化——client 用 engine.port），SWEEP=1 显式跑。清扫正确性证据链：
  * 引擎编排见本文件；代码逻辑由轮 2 审查复核（hasRunningRun 跳过 + pipeline-temp 前缀 + keep 名单）。
  */
 const maybeTest = process.env.SWEEP ? test : test.skip;
@@ -29,7 +29,7 @@ let sweepWorked = false;
 beforeAll(async () => {
   if (!process.env.SWEEP) return;
   engine = await startEngine();
-  const client = new OpenRefineClient(ENGINE_PORT);
+  const client = new OpenRefineClient(engine.port); // M7/B4：随机端口后不能用固定常量
   orphanIds = [
     await client.createProject(FIXTURE, "pipeline-temp"),
     await client.createProject(FIXTURE, "pipeline-temp-旧泄漏"),

@@ -7,6 +7,7 @@ import {
   listVersions,
   type DatasetSummary,
   type DatasetVersion,
+  type AuditEvent,
   type LineageVersion,
 } from "../api.js";
 import { PreviewTable } from "./PreviewTable.js";
@@ -40,6 +41,7 @@ function LineageCard({ v }: { v: LineageVersion }) {
 export function VersionsTab({ dataset }: { dataset: DatasetSummary }) {
   const [versions, setVersions] = useState<DatasetVersion[] | null>(null);
   const [lineage, setLineage] = useState<LineageVersion[] | null>(null);
+  const [recentAudit, setRecentAudit] = useState<AuditEvent[]>([]);
   const [selected, setSelected] = useState<number | null>(null); // null = 当前工作台态（引擎实时）
   const [error, setError] = useState<string | null>(null);
 
@@ -48,7 +50,10 @@ export function VersionsTab({ dataset }: { dataset: DatasetSummary }) {
       .then(setVersions)
       .catch(() => setVersions([]));
     getLineage(dataset.id)
-      .then(setLineage)
+      .then((l) => {
+        setLineage(l.versions);
+        setRecentAudit(l.recent_audit ?? []);
+      })
       .catch(() => setLineage(null)); // 失败≠空血缘：不渲染误导性"无上游运行"文案
   }, [dataset.id]);
 
@@ -100,6 +105,21 @@ export function VersionsTab({ dataset }: { dataset: DatasetSummary }) {
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {recentAudit.length > 0 && (
+        <div className="card p-3.5" data-testid="recent-audit">
+          <div className="font-semibold text-[13.5px] mb-2">最近操作记录</div>
+          <div className="grid gap-1">
+            {recentAudit.map((a, i) => (
+              <div key={i} className="flex items-center gap-2 text-[11.5px] text-text-2">
+                <span className="mono text-text-3">{new Date(a.ts).toLocaleString("zh-CN")}</span>
+                <span className="font-medium">{a.username}</span>
+                <span className="chip bg-surface-2 text-text-2 border-border mono">{a.action}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

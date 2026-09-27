@@ -7,7 +7,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { buildApp } from "../src/app.js";
-import { ENGINE_PORT } from "@data-cleaning/adapter-openrefine";
 
 const FIXTURE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -96,8 +95,13 @@ test("oversized upload rejected with 413", async () => {
 });
 
 test("engine recycled after app close (no orphan process)", async () => {
+  // M7/B4：端口随机化后 3333 断言恒真空转——读 .engine-port 验证对应端口已释放
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const portFile = resolve(import.meta.dirname, "../../../workspace/.engine-port");
+  const enginePort = parseInt(readFileSync(portFile, "utf-8").trim(), 10);
   await app.close();
   await expect(
-    fetch(`http://127.0.0.1:${ENGINE_PORT}/command/core/get-version`),
+    fetch(`http://127.0.0.1:${enginePort}/command/core/get-version`),
   ).rejects.toThrow();
 });

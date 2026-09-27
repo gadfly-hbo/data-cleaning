@@ -1,48 +1,43 @@
-# M6 提案 — 多用户基础：认证与数据隔离（讨论稿固定）
+# M7 提案 — 平台化收尾：细粒度权限、引擎端口隔离、审计日志与债清偿（讨论稿固定）
 
-> 来源：M5 flow DONE 后（commit 7601893），用户启动 `/dev-flow M6`。
-> 规格上位源：docs/design.md v2（远期清单：多用户/RBAC、S3、分布式引擎、协作；M5 proposal 明示"多用户/RBAC → M6"）。
-> M5 移交清单（.flow/tasks.md）：多用户/RBAC、SeaTunnel/DataX 云端形态评估、docker 首次真实构建、PG/MySQL 真实服务验证、ngram 过合并 API 文档警示。
+> 来源：M6 flow DONE 后（commit 7292248 + 6e4dd96），用户启动 `/dev-flow M7`。
+> 规格上位源：docs/design.md v2 + M6 proposal（"细粒度 RBAC → M7"、"网络级引擎隔离 → M7"）。
+> M6 遗留清单：RBAC 角色矩阵、引擎 socket 化、S3/协作（远期）、suggest 分支无测试、用户菜单组件测试、docker/PG/MySQL 环境限制项。
 
 ## 范围裁剪（本提案第一决策，需用户在 diff 门确认）
 
-M6 做多用户的**地基**而非全部：认证 + 数据隔离。完整 RBAC（角色矩阵/细粒度权限）是多用户地基验证后的下一层，推迟记录。
-
 **纳入（本 flow）**：
-1. **用户认证**：SQLite users 表（用户名+密码哈希 argon2/bcrypt）；httpOnly cookie session；首次启动创建管理员账号（setup 向导页）。
-2. **数据集隔离**：datasets/pipelines/versions 等全部业务表加 owner；非管理员只能看到/操作自己的对象；admin 全可见。
-3. **API 守卫**：所有 /api/* 业务端点经 session 中间件（登录/注册之外一律 401）。
-4. **前端**：登录页 + setup 页 + 用户菜单（登出/身份显示）。
-5. **M5 移交清偿**：ngram 聚类过合并风险写入聚类 UI 提示与 API 文档；SeaTunnel/DataX 决策记录追加 design.md（同 M4 daemon 备注模式）。
-6. **环境限制项持续记录**：docker 首次构建与 PG/MySQL 真实验证仍因环境不可行，更新 README 的验证状态标注。
+1. **细粒度 RBAC**：admin / editor / viewer 三级角色——viewer 只读（预览/画像/质量/血缘/导出）、editor 可清洗/定版/触发管道、admin 全权+用户管理。替换 M6 的"admin 他人只读"简化语义为完整权限矩阵。
+2. **引擎端口随机化**：OpenRefine 引擎启动时绑定 OS 分配的随机端口（`-p 0`），studio-api 记录并代理——本机进程不再能通过固定 3333 直连引擎绕过应用层隔离。
+3. **审计日志**：数据集创建/清洗操作/管道触发/用户管理等关键动作记录 `audit_log` 表（谁/何时/什么/结果），admin 可查——最小审计能力（无专用 UI，API 查询 + 前端血缘详情页嵌入即可）。
+4. **M6 遗留债清偿**：suggest 未配置分支测试、用户菜单/登出组件测试、setup 并发竞态（先 hash 再同步段）、login timing 侧信道（哑哈希恒时 verify）、DDL 直接带 owner_id。
+5. **文档**：design.md 补 M7 权限矩阵决策段；README 更新角色说明。
 
 **推迟（不在本 flow，记录去向）**：
-- **完整 RBAC 角色矩阵（admin/editor/viewer 多级权限）→ M7**：等认证+隔离的地基在真实使用中验证后再分层。
-- **S3/对象存储、分布式引擎、协作（多人同时编辑）→ 远期**（维持 design.md 原案）。
-- **注册开放流**：M6 管理员创建用户（封闭式），自助注册开放需产品决策（隐私/滥用）。
-- **密码找回/邮箱/SSO/OAuth**：本地单机产品不适用。
+- S3/对象存储、分布式引擎、协作（多人同时编辑）→ 远期（维持 design.md 原案）。
+- docker 首次真实构建 / PG/MySQL 真实服务验证 → 环境限制持续记录。
+- 审计日志专用 UI 页 → 后续迭代（M7 只做 API + 血缘详情嵌入）。
 
-## 背景与既定决策（M6 不可重议，继承 design.md v2 / M0-M5）
+## 背景与既定决策（M7 不可重议，继承 design.md v2 / M0-M6）
 
 - 产品模式不变：TS 壳 + adapter 隔离 + pybridge；DESIGN.md UI 规范；许可证/依赖锁纪律。
-- 引擎/管道/版本/血缘/聚类/LLM/DB 接入——全部继承，M6 只加"谁在用"与"谁能看什么"两个横切面。
-- 单机本地部署形态维持（认证是协作的前置而非远程访问需求）。
-- session 用签名 cookie（无外部 session store——SQLite 本地即可）。
+- 认证/隔离（M6）继承：签名 cookie + argon2id + owner 隔离 + admin 体系。
+- 引擎随机端口需要 adapter 的 startEngine/waitHealthy/复用探测全链路改造（端口不再是常量）。
+- 审计日志是 append-only 事件流（不做可变审计——只有插入没有更新/删除）。
 
-## M6 目标（本 flow 范围）
+## M7 目标（本 flow 范围）
 
-设计验收（自拟，diff 门确认）：**两个人各自登录，互相看不见对方的数据集；admin 全可见；未登录任何业务 API 401；首次启动有引导创建管理员。** 组件：
+设计验收（自拟，diff 门确认）：**三种角色各自看到/做到恰好自己的权限边界；引擎端口对进程扫描不可预测；关键动作有审计记录且 admin 可查。** 组件：
 
-1. studio-api：users 表 + sessions（或签名 cookie）+ auth 中间件 + owner 字段迁移 + 全端点守卫 + 管理员用户管理端点。
-2. studio-web：/login 页 + /setup 页（首启）+ AppShell 用户菜单 + 路由守卫（未登录→login）。
-3. 文档：ngram 警示 + SeaTunnel/DataX 决策记录 + README 更新。
-4. 测试：认证/隔离/管理员全链路集成测试 + 前端组件测试。
+1. studio-api：role 枚举扩展（admin|editor|viewer）+ 权限矩阵守卫替换现有 owner 检查 + 引擎随机端口 + 审计日志表与写入钩子。
+2. adapters/openrefine：startEngine 返回动态端口 + client 接受 port 参数（去常量化）。
+3. studio-web：角色 chip 三级 + viewer 权限 UI 隐藏（清洗/定版按钮不渲染）+ 审计记录在血缘详情的嵌入展示。
+4. 测试：角色矩阵全路径测试 + 端口随机化验证（两次启动端口不同）+ 审计写入与查询测试。
+5. 文档与 M6 债清偿。
 
 ## 开放问题（proposal 未定，留给 PRD/GRILL）
 
-- 密码哈希选型（argon2id vs bcrypt——node 生态依赖与许可证）。
-- session 机制细节（签名 cookie payload / TTL / 登出语义）。
-- owner 迁移策略（存量数据归属谁——首管理员？）。
-- 引擎项目的隔离模型（OpenRefine 项目目前全共享——project_id 归属校验够不够）。
-- 上传/DB 拉取的 owner 标注位置。
-- 管理员用户管理 UI 的最小形态（仅 API + curl？还是简单页面）。
+- viewer 能否上传数据集？（推荐：否——viewer 纯消费已有数据）
+- editor 能否管理管道调度（改间隔）？（推荐：否——调度属 admin）
+- 审计日志的保留策略与清理。（推荐：M7 不清理，append-only 无限增长，后续迭代处理）
+- 引擎随机端口的复用探测语义（探测哪个端口？随机分配后如何知道"已有引擎"？——workspace 文件记录当前端口）。

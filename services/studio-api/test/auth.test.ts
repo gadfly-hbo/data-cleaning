@@ -57,7 +57,7 @@ test("setup-status → setup (first admin) → me → logout", async () => {
   expect(adminCookie.startsWith("dc_session=")).toBe(true);
 
   // 幂等：二次 setup 409
-  const dup = await post("/api/auth/setup", { username: "x", password: "y12345678" });
+  const dup = await post("/api/auth/setup", { username: "second", password: "y12345678" });
   expect(dup.status).toBe(409);
 
   const me = (await (await get("/api/auth/me", adminCookie)).json()) as { username: string; role: string };
@@ -109,8 +109,7 @@ test("legacy data backfilled to admin owner after setup (REVIEW 轮 1 B2 真实�
   // 独立 workspace：预插无 owner 的 datasets/pipelines 行 → setup → 归属 admin 经 API 可见
   const legacyWs = mkdtempSync(path.join(tmpdir(), "studio-mig-"));
   const legacyDb = openDb(path.join(legacyWs, "studio.db"));
-  legacyDb.exec("ALTER TABLE datasets ADD COLUMN owner_id INTEGER");
-  legacyDb.exec("ALTER TABLE pipelines ADD COLUMN owner_id INTEGER");
+  // V5-⑤：新 DDL 已含 owner_id 列——legacy 状态 = 行级 NULL（旧库 ALTER 回填路径由 pragma 检查覆盖）
   const insDs = legacyDb.prepare(
     "INSERT INTO datasets (owner_id, name, file_hash, file_path, project_id, row_count, columns_json, created_at) VALUES (NULL,?,?,?,1,1,'[]',?)",
   );

@@ -9,15 +9,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import { OpenRefineClient } from "../src/client.js";
-import { ENGINE_PORT, startEngine, stopEngine } from "../src/engine.js";
+import { startEngine, stopEngine } from "../src/engine.js";
 
 const WS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../workspace");
 const LARGE_CSV = path.join(WS, "messy-100mb.csv");
 
-function javaRssMb(): number {
+function javaRssMb(port: number): number {
   // 只取 LISTEN 状态进程：本机浏览器会主动连上已监听端口，lsof 不加过滤时
   // 返回的第一行可能是 Chrome Helper（REVIEW 轮 1 的实测教训）
-  const pids = execSync(`lsof -ti tcp:${ENGINE_PORT} -sTCP:LISTEN`)
+  const pids = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`)
     .toString()
     .trim()
     .split("\n");
@@ -47,7 +47,7 @@ test.skipIf(!process.env.PERF)(
       let t0 = Date.now();
       projectId = await client.createProject(LARGE_CSV, "perf-100mb");
       t.createMs = Date.now() - t0;
-      const rssAfterCreate = javaRssMb();
+      const rssAfterCreate = javaRssMb(engine.port);
       const rowCount = await client.getRowCount(projectId);
 
       t0 = Date.now();
@@ -61,13 +61,13 @@ test.skipIf(!process.env.PERF)(
         },
       ]);
       t.applyMs = Date.now() - t0;
-      const rssAfterApply = javaRssMb();
+      const rssAfterApply = javaRssMb(engine.port);
 
       t0 = Date.now();
       const csv = await client.exportRowsCsv(projectId);
       t.exportMs = Date.now() - t0;
       writeFileSync(path.join(WS, "perf-100mb-export.csv"), csv);
-      const rssPeak = javaRssMb();
+      const rssPeak = javaRssMb(engine.port);
 
       // 超时保护（PRD 判据）：单阶段 5 分钟
       for (const [k, v] of Object.entries(t)) {

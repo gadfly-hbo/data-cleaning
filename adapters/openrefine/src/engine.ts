@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,7 @@ export const ENGINE_VERSION = "3.10.1";
  */
 export const REPORTED_VERSION = "3.10-SNAPSHOT [TRUNK]";
 
+/** @deprecated M7 起端口动态化——使用 EngineHandle.port 或 workspace/.engine-port */
 export const ENGINE_PORT = 3333;
 
 const SRC_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +24,7 @@ const DIST = path.join(WS, "dist", `openrefine-${ENGINE_VERSION}`);
 const JRE_DIR = path.join(WS, "jre");
 const DATA_DIR = path.join(WS, "engine-data");
 const ENGINE_LOG = path.join(WS, "engine.log");
+const PORT_FILE = path.join(WS, ".engine-port");
 
 const OPENREFINE_TARBALL = `openrefine-linux-${ENGINE_VERSION}.tar.gz`;
 const OPENREFINE_URL = `https://github.com/OpenRefine/OpenRefine/releases/download/${ENGINE_VERSION}/${OPENREFINE_TARBALL}`;
@@ -78,13 +80,15 @@ export async function startEngine(): Promise<EngineHandle> {
       "no java found: run node scripts/setup-engine.mjs (installs workspace/jre) or install a JDK/JRE",
     );
   }
-  // 先探测复用：端口上已有健康引擎（如上一测试套件或外部进程遗留）直接复用，
-  // 不再 spawn（spawn 会绑定失败退出，且让我们误持有"所有权"导致 stop 误杀/误查端口）
+  // 先探测复用：读 workspace/.engine-port（M7：端口随机化后不能固定探测）
   try {
-    await waitHealthy(ENGINE_PORT, 2_000);
-    return { child: null, port: ENGINE_PORT, reused: true };
+    const recordedPort = parseInt(readFileSync(PORT_FILE, "utf-8").trim(), 10);
+    if (Number.isInteger(recordedPort) && recordedPort > 0) {
+      await waitHealthy(recordedPort, 2_000);
+      return { child: null, port: recordedPort, reused: true };
+    }
   } catch {
-    // 端口无健康引擎——走正常启动
+    // 文件缺失/损坏/引擎不在——走正常启动
   }
   // 冷启动重叠窗口（M4 轮 3 清偿①）：spawn 后若 child 因端口被占早退（他人引擎
   // 尚在启动中），waitHealthy 会打到他人引擎成功——此时本地 child 已死，转判复用
@@ -94,7 +98,7 @@ export async function startEngine(): Promise<EngineHandle> {
   log.write(`\n===== engine start ${new Date().toISOString()} =====\n`);
 
   const child = spawn(path.join(DIST, "refine"), [
-    "-p", String(ENGINE_PORT),
+    "-p", "0", // OS 分配随机端口（M7：消除本机固定端口旁路）
     "-i", "127.0.0.1",
     "-d", DATA_DIR,
     "-x", "refine.headless=true", // 不弹浏览器（Refine.class 内部属性：启动后跳过 Desktop.browse）
@@ -110,8 +114,11 @@ export async function startEngine(): Promise<EngineHandle> {
   child.stdout!.pipe(log);
   child.stderr!.pipe(log);
 
+  // 记录本次启动前的日志偏移——resolvePort 只搜新写入段（旧日志含历史端口会误匹配）
+  const logOffset = existsSync(ENGINE_LOG) ? readFileSync(ENGINE_LOG).length : 0;
+  const actualPort = await resolvePort(logOffset);
   try {
-    await waitHealthy(ENGINE_PORT, 120_000);
+    await waitHealthy(actualPort, 120_000);
   } catch (err) {
     // 健康检查失败必须回收子进程组，否则孤儿引擎占死端口（REVIEW 轮 1 修复）
     killGroup(child, "SIGTERM");
@@ -123,9 +130,10 @@ export async function startEngine(): Promise<EngineHandle> {
   // 启动中）而 waitHealthy 打到他人引擎成功——转判复用，避免 stop 误查端口
   if (child.exitCode !== null || child.signalCode !== null) {
     log.write(`===== engine reused (local spawn exited early) =====\n`);
-    return { child: null, port: ENGINE_PORT, reused: true };
+    return { child: null, port: actualPort, reused: true };
   }
-  return { child, port: ENGINE_PORT, reused: false };
+  writeFileSync(PORT_FILE, String(actualPort), { mode: 0o600 });
+  return { child, port: actualPort, reused: false };
 }
 
 function killGroup(child: ChildProcess, sig: NodeJS.Signals): void {
@@ -158,6 +166,20 @@ export async function stopEngine(engine: EngineHandle): Promise<void> {
 
   const closed = await waitPortClosed(port, 15_000);
   if (!closed) throw new Error(`engine port ${port} still open after stop`);
+  try { unlinkSync(PORT_FILE); } catch { /* best-effort */ }
+}
+
+/** 从引擎日志解析实际监听端口（-p 0 后 Jetty 分配的随机端口）——只搜 offset 之后的新写入段。 */
+async function resolvePort(offset: number): Promise<number> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    // Buffer 切片后转字符串——字节偏移不能直接用在 UTF-16 字符串 slice 上（REVIEW 轮 1 B1）
+    const text = readFileSync(ENGINE_LOG).subarray(offset).toString("utf-8");
+    const match = /Started ServerConnector@\S+\{[^}]*\}\{127\.0\.0\.1:(\d+)\}/.exec(text);
+    if (match) return parseInt(match[1]!, 10);
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error("could not resolve engine port from log within 30s");
 }
 
 async function waitHealthy(port: number, timeoutMs: number): Promise<void> {

@@ -171,6 +171,35 @@ test("malformed LLM_BASE_URL degrades to disabled, not crash (M4 轮 3 清偿③
   await app3.close();
 });
 
+test("suggest endpoint returns enabled:false hint for logged-in user when unconfigured (V5-①)", async () => {
+  const prev = { ...process.env };
+  delete process.env.LLM_BASE_URL;
+  delete process.env.LLM_API_KEY;
+  const app2 = await buildApp({
+    workspaceDir: mkdtempSync(path.join(tmpdir(), "studio-llm2-")),
+    enableScheduler: false,
+  });
+  await app2.listen({ port: 0, host: "127.0.0.1" });
+  const a = app2.server.address();
+  const base2 = typeof a === "object" && a ? `http://127.0.0.1:${a.port}` : "";
+  const setup = await fetch(`${base2}/api/auth/setup`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "usra", password: "usra-pass-12" }),
+  });
+  const c = (setup.headers.get("set-cookie") ?? "").split(";")[0]!;
+  // 已登录用户访问 suggest → 200 enabled:false + hint（V5-① 修复：此前无测试覆盖此分支）
+  const res = await fetch(`${base2}/api/datasets/1/suggest`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: c },
+    body: JSON.stringify({ column: "x" }),
+  });
+  const body = (await res.json()) as { enabled: boolean; hint?: string };
+  expect(res.status).toBe(200);
+  expect(body.enabled).toBe(false);
+  expect(body.hint).toContain("LLM_BASE_URL");
+  await app2.close();
+  Object.assign(process.env, prev);
+});
+
 test("disabled when unconfigured (fresh app without llm env)", async () => {
   const previous = { ...process.env };
   delete process.env.LLM_BASE_URL;

@@ -1,33 +1,46 @@
-# REVIEW 轮 1 发现（M6，code-reviewer 子代理，fresh context，2026-09-27）
+# REVIEW 轮 1 发现（M7，code-reviewer 子代理，fresh context，2026-09-28）
 
 ## 审查结论
-VERDICT: REQUEST_CHANGES — 认证核心（argon2id/HMAC/cookie flags/401-404 语义/守卫矩阵/SQL 注入面）质量高无旁路；但 1 个 PRD 契约违反 + 2 处虚假验收记录。
+REQUEST_CHANGES — verify 全绿属实；1 个潜伏正确性 bug（UTF-16 切片）、审计覆盖未达 PRD 枚举（规格轴不过）、1 个双写 bug、2 处测试削弱。
 
 ## 阻断性问题（BLOCKER）
-1. [app.ts:482,541,692,897,446] 5 个 GET 端点（history/recipe/lineage/versions/profile）误用 writableDataset——admin 审计读他人对象这 5 路 404，违反 N5 与 story 5。复检：admin GET 他人 /history 应 200。
-2. [auth.test.ts:108-117] 存量迁移测试空转（空库 0==0），删 backfillOwnerToAdmin 仍绿——PRD 规定的真实迁移测试不存在，U1 验收记录为假。复检：预插无 owner 行→setup→admin 经 API 可见。
-3. [apps/studio-web/test/] 前端 auth 组件测试完全缺失（setup/login/401 跳转/用户菜单），U4 三项验收勾选为假。
+1. [engine.ts:117+176] resolvePort 字节偏移用在 UTF-16 字符串 slice 上——日志累积多字节字符后启动必失败。修：Buffer.subarray(offset).toString()。
+2. [app.ts] 审计 11 action 枚举只实现 5 项——user_create/disable/reset/logout/history_restore/db_fetch 缺失；用户管理动作零审计与 story 4 冲突。
+3. [app.ts:439+444] 单次上传双写 dataset_upload，且 439 的 detail 硬编码 format:"xlsx" 对 CSV 即假数据。
+4. [datasets.test.ts / orphan-sweep.test.ts] ENGINE_PORT=3333 残留：「engine recycled」断言恒真空转；SWEEP 门控测试已损坏（连 3333 而引擎在随机端口）。
 
 ## 建议改进（SUGGESTION）
-- setup 并发竞态（hash await 在 count+insert 之间，N6 声明不成立）：先 hash 再同步段。
-- 401 矩阵仅 7 端点低于声称的 ≥15。
-- login 用户名枚举 timing 侧信道（用户不存在时跳过 verify）。
-- 新库 DDL 不含 owner_id（依赖 setup ALTER）。
-- /api/auth/me 重复实现中间件逻辑。
+- insertAudit catch 无 stderr 记录（PRD 明确要求）。
+- .engine-port 0644 建议 0600。
+- 存量 role='user' 无迁移（me 返回越类型值）。
+- setup 校验先于 409 的行为变更未声明。
+- role-matrix 覆盖缺口（O3 admin 触发他人管道正向零测试；viewer 负例不全）。
+- DatasetPage role null 期 viewer 闪现清洗 tab（纯 UI）。
+- detail 500 截断可能产生非法 JSON。
 
 ## 覆盖确认
-- 已检查：33 条路由守卫矩阵逐一核对；preHandler 先注册路由生效实证；argon2 默认参数确认；SQL 全参数化；HMAC 时序安全；cookie flags；verify 完整重跑一致。
-- 查过无发现：授权旁路/SQL注入/HML 时序/session key 泄漏/COLLATE NOCASE/401 循环保护/测试削弱。
+- 已检查：18 改动+3 新测试全文；端点/守卫/审计钩子全量映射；O1-O9 逐条对照；M6 五债真实落地核验；verify 完整重跑一致。
 
 ---
 
-# REVIEW 轮 2 发现（M6，fresh code-reviewer，2026-09-27）
+# REVIEW 轮 2 发现（M7，fresh code-reviewer，2026-09-28）
 
 ## 审查结论
-VERDICT: PASS（APPROVE_WITH_COMMENTS）— 三 BLOCKER 真实修复且经运行时/代码双重验证（含独立直插 DB 验证 admin 读他人端点恢复 200）；懒写副作用疑点查过无发现（幂等 UPDATE + 同步 check-insert + UNIQUE 兜底）。
+FAIL — B1（UTF-16 切片）/B4（ENGINE_PORT 残留）修复有效且验证为真；**B2/B3 实际未修复**——轮 1 修复脚本的 app.ts 写入再次静默丢失（同 db.ts 事故模式的第三次复发），修复记录与代码不符。建议三条核实落地。
 
-## 建议（5 条，作者已修 3）
-1. isolation 补 5 端点 B1 回归锁定（已修）。2. 用户菜单/登出组件测试（记录未修——U6 浏览器手工实证支撑，验收措辞已核）。3. tasks U1 端点数改实际 7（已修）。4. 迁移测试补 pipelines DB 层断言（已修）。5. suggest 未配置分支无测试（记录移交）。
+## 作者复核与真实修复
+- 亲自 grep 证实 B2/B3 缺失后，改用 Edit 工具逐处手术修复：上传审计单写+真实 ext；6 处钩子（user_create/disable/reset/logout/restore/db_fetch）逐条 assert 应用。
+- **新纪律执行：修复后必须先过 grep 验证关（11 action 逐一计数）再声明完成**——本次 grep 输出：13 个 audit 调用点、11 action 全 1+。
+- 补 audit.test「all audit actions covered」回归锁定（触发管道+建号+停用+重置+restore+logout+重登，断言 10 action 存在）。
+- verify exit 0（web29+api59|1skip+adapter13|1skip+py28+三tsc）。
 
-## 覆盖确认
-- 33 路由守卫矩阵逐一核对；独立运行时验证 admin 读他人；完整 verify 重跑一致。
+---
+
+# REVIEW 轮 3 发现（M7，fresh code-reviewer，2026-09-28）
+
+## 审查结论
+APPROVE（PASS）— 不信修复记录全部亲自取证：B2/B3 真实落地（11 action 逐一 grep 对应 + 单写真实 ext + 回归测试驱动真实端点）；B1/B4 无回归；db.ts 完整。
+
+## 建议（作者已当场修复）
+1. db_fetch 审计断言缺口——audit.test 补真实 SQLite 源触发+断言（已修，4/4 绿）。
+2. 修复记录数字瑕疵（13 vs 11 调用点）——以本轮审查的逐一计数为准。

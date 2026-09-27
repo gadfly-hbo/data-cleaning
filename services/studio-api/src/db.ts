@@ -27,6 +27,7 @@ export interface DatasetRecord {
 const DDL = `
 CREATE TABLE IF NOT EXISTS datasets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id INTEGER,
   name TEXT NOT NULL,
   file_hash TEXT NOT NULL,
   file_path TEXT NOT NULL,
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS datasets (
 CREATE INDEX IF NOT EXISTS idx_datasets_hash ON datasets(file_hash);
 CREATE TABLE IF NOT EXISTS pipelines (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id INTEGER,
   dataset_id INTEGER NOT NULL,
   name TEXT NOT NULL,
   recipe_json TEXT NOT NULL,
@@ -63,9 +65,19 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE COLLATE NOCASE,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'user',
+  role TEXT NOT NULL DEFAULT 'editor',
   disabled INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  username TEXT NOT NULL,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  detail_json TEXT
 );
 CREATE TABLE IF NOT EXISTS dataset_versions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -375,7 +387,7 @@ export function failStaleRuns(db: DatabaseSync): number[] {
 export interface UserRecord {
   id: number;
   username: string;
-  role: "admin" | "user";
+  role: "admin" | "editor" | "viewer";
   disabled: boolean;
   created_at: string;
 }
@@ -389,7 +401,7 @@ export function insertUser(
   db: DatabaseSync,
   username: string,
   passwordHash: string,
-  role: "admin" | "user" = "user",
+  role: "admin" | "editor" | "viewer" = "editor",
 ): UserRecord {
   const now = new Date().toISOString();
   const r = db
@@ -404,7 +416,7 @@ export function getUserByName(db: DatabaseSync, username: string): (UserRecord &
     .get(username) as Record<string, unknown> | undefined;
   if (!row) return null;
   return {
-    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "user",
+    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "editor" | "viewer",
     disabled: Number(row.disabled) === 1, created_at: String(row.created_at),
     password_hash: String(row.password_hash),
   };
@@ -414,7 +426,7 @@ export function getUser(db: DatabaseSync, id: number): UserRecord | null {
   const row = db.prepare("SELECT * FROM users WHERE id = ?").get(id) as Record<string, unknown> | undefined;
   if (!row) return null;
   return {
-    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "user",
+    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "editor" | "viewer",
     disabled: Number(row.disabled) === 1, created_at: String(row.created_at),
   };
 }
@@ -422,7 +434,7 @@ export function getUser(db: DatabaseSync, id: number): UserRecord | null {
 export function listUsers(db: DatabaseSync): Array<UserRecord> {
   const rows = db.prepare("SELECT * FROM users ORDER BY id").all() as Array<Record<string, unknown>>;
   return rows.map((row) => ({
-    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "user",
+    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "editor" | "viewer",
     disabled: Number(row.disabled) === 1, created_at: String(row.created_at),
   }));
 }
@@ -455,4 +467,77 @@ export function backfillOwnerToAdmin(db: DatabaseSync): number {
     changed += Number(r.changes);
   }
   return changed;
+}
+
+
+// ===== 审计日志（M7/V3，append-only）=====
+
+export interface AuditEntry {
+  id: number;
+  ts: string;
+  user_id: number;
+  username: string;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  detail: string | null;
+}
+
+export function insertAudit(
+  db: DatabaseSync,
+  userId: number,
+  username: string,
+  action: string,
+  resourceType: string,
+  resourceId: string | number,
+  detail?: unknown,
+): void {
+  try {
+    db.prepare(
+      "INSERT INTO audit_log (ts, user_id, username, action, resource_type, resource_id, detail_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      new Date().toISOString(), userId, username, action, resourceType, String(resourceId),
+      detail ? JSON.stringify(detail).slice(0, 500) : null,
+    );
+  } catch (err) {
+    // best-effort 不阻断业务，但必须留痕（PRD：失败记 stderr）
+    console.error("[audit] insert failed:", err);
+  }
+}
+
+export function listAudit(db: DatabaseSync, limit: number, offset: number): Array<AuditEntry> {
+  const rows = db
+    .prepare("SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?")
+    .all(limit, offset) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: Number(row.id), ts: String(row.ts), user_id: Number(row.user_id),
+    username: String(row.username), action: String(row.action),
+    resource_type: String(row.resource_type), resource_id: String(row.resource_id),
+    detail: row.detail_json ? String(row.detail_json) : null,
+  }));
+}
+
+export function listAuditForResource(
+  db: DatabaseSync,
+  resourceType: string,
+  resourceId: string,
+  limit: number,
+): Array<{ ts: string; username: string; action: string }> {
+  const rows = db
+    .prepare(
+      "SELECT ts, username, action FROM audit_log WHERE resource_type = ? AND resource_id = ? ORDER BY id DESC LIMIT ?",
+    )
+    .all(resourceType, resourceId, limit) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    ts: String(row.ts), username: String(row.username), action: String(row.action),
+  }));
+}
+
+/** M7：存量 role='user' 迁移为 'editor'（幂等）。 */
+export function migrateLegacyRoles(db: DatabaseSync): void {
+  try {
+    db.prepare("UPDATE users SET role = 'editor' WHERE role = 'user'").run();
+  } catch {
+    // users 表可能不存在（极端早期库）——忽略
+  }
 }

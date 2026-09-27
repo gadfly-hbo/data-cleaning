@@ -7,6 +7,7 @@ import { VersionsTab } from "./VersionsTab.js";
 import { PreviewTable } from "./PreviewTable.js";
 import {
   getDataset,
+  me,
   revalidateRules,
   type DatasetSummary,
   type ProfileColumn,
@@ -15,13 +16,14 @@ import {
 
 type Tab = "preview" | "profile" | "quality" | "cleaning" | "versions";
 
-const TABS: Array<{ key: Tab; label: string }> = [
+const ALL_TABS: Array<{ key: Tab; label: string }> = [
   { key: "preview", label: "预览" },
   { key: "profile", label: "画像" },
   { key: "quality", label: "质量" },
   { key: "cleaning", label: "清洗" },
   { key: "versions", label: "版本" },
 ];
+const VIEWER_HIDDEN: Set<Tab> = new Set(["cleaning"]); // M7/V4：viewer 纯只读
 
 const KIND_LABELS: Record<string, string> = {
   not_null: "非空",
@@ -36,6 +38,11 @@ export function DatasetPage() {
   const [dataset, setDataset] = useState<DatasetSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("preview");
+  const [role, setRole] = useState<string | null>(null);
+
+  useEffect(() => {
+    me().then((u) => setRole(u.role)).catch(() => setRole(null));
+  }, []);
 
   useEffect(() => {
     getDataset(datasetId)
@@ -64,7 +71,7 @@ export function DatasetPage() {
       </p>
 
       <div className="flex gap-1.5 mb-3.5">
-        {TABS.map(({ key, label }) => (
+        {ALL_TABS.filter(({ key }) => role !== "viewer" || !VIEWER_HIDDEN.has(key)).map(({ key, label }) => (
           <button
             key={key}
             type="button"

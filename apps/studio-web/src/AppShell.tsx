@@ -77,8 +77,12 @@ export function AppShell() {
           <div className="px-4 py-3 border-t border-border grid gap-2">
             {user && (
               <div className="flex items-center gap-2">
-                <span className={`chip ${user.role === "admin" ? "chip-accent" : "chip-ok"}`}>
-                  {user.username}{user.role === "admin" ? " · admin" : ""}
+                <span className={`chip ${
+                  user.role === "admin" ? "chip-accent"
+                  : user.role === "editor" ? "chip-ok"
+                  : "bg-surface-2 text-text-2 border-border"
+                }`} data-testid="role-chip">
+                  {user.username}{user.role !== "viewer" ? ` · ${user.role}` : ""}
                 </span>
                 <button
                   type="button"

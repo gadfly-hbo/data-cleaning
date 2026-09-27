@@ -11,6 +11,10 @@ import fastifyStatic from "@fastify/static";
 import { createReadStream } from "node:fs";
 import {
   backfillOwnerToAdmin,
+  migrateLegacyRoles,
+  insertAudit,
+  listAudit,
+  listAuditForResource,
   getDataset,
   getUser,
   getUserByName,
@@ -41,7 +45,7 @@ import {
   type PipelineRecord,
 } from "./db.js";
 import { EngineManager } from "./engine-manager.js";
-import { ENGINE_PORT, OpenRefineClient } from "@data-cleaning/adapter-openrefine";
+import { OpenRefineClient } from "@data-cleaning/adapter-openrefine";
 import { PyBridgeExecutor } from "./pybridge.js";
 import { startScheduler } from "./scheduler.js";
 import {
@@ -49,6 +53,9 @@ import {
   hashPassword, validatePassword, validateUsername, verifyPassword,
 } from "./auth.js";
 import { requestSuggestions, resolveLlmConfig, type LlmConfig, type SuggestionColumn } from "./llm.js";
+
+// V5-④：login 对不存在用户做恒时哑 verify 的哈希常量（真实 argon2id 参数形态）
+const DUMMY_ARGON2_HASH = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
@@ -81,6 +88,7 @@ function toApi(rec: DatasetRecord) {
 export async function buildApp(opts: AppOptions = {}) {
   const workspace = opts.workspaceDir ?? path.join(REPO_ROOT, "workspace");
   const db = openDb(path.join(workspace, "studio.db"));
+  migrateLegacyRoles(db);
   const sessionKey = new SessionKey(path.join(workspace, ".session-key"));
   for (const staleId of failStaleRuns(db)) {
     // 上次进程退出遗留的 running run 一律置 fail（否则管道永久 409/调度停摆）；
@@ -114,6 +122,7 @@ export async function buildApp(opts: AppOptions = {}) {
       for (let attempt = 1; attempt <= 3; attempt++) {
         const ok = await (async () => {
       try {
+        const client = await engineManager.ensureEngine(); // M7：动态端口——ensureEngine 已返回带正确端口的 client
         // 与在跑管道运行的并发保护（REVIEW 轮 1 建议 2）：清扫可能删掉在跑 run 的临时项目
         const busyPipelineIds = new Set(
           (db.prepare("SELECT DISTINCT pipeline_id FROM pipeline_runs WHERE status = 'running'").all() as Array<{ pipeline_id: number }>).map((r) => r.pipeline_id),
@@ -122,7 +131,6 @@ export async function buildApp(opts: AppOptions = {}) {
           console.log("[startup-sweep] skipped: pipelines running（本轮放弃，不重试占用等待）");
           return true; // 与成功路径一致：无需重试
         }
-          const client = new OpenRefineClient(ENGINE_PORT);
           const keep = new Set(
             (listDatasets(db) as unknown[] as Array<{ project_id: number }>).map((r) => r.project_id),
           );
@@ -147,6 +155,16 @@ export async function buildApp(opts: AppOptions = {}) {
 
   const app = fastify({ logger: false });
   await app.register(multipart, { limits: { fileSize: MAX_UPLOAD_BYTES } });
+
+  // ===== 审计日志查询（M7/V3：admin 专用）=====
+
+  app.get("/api/audit", async (req, reply) => {
+    if (actor(req).role !== "admin") return reply.code(403).send({ error: "admin only" });
+    const query = req.query as { limit?: string; offset?: string };
+    const limit = Math.min(200, Math.max(1, Number(query.limit ?? 50) || 50));
+    const offset = Math.max(0, Number(query.offset ?? 0) || 0);
+    return { audit: listAudit(db, limit, offset) };
+  });
 
   // ===== 用户管理（M6/U3：admin 专用）=====
 
@@ -176,7 +194,9 @@ export async function buildApp(opts: AppOptions = {}) {
     if (getUserByName(db, body.username)) {
       return reply.code(409).send({ error: `用户名已存在: ${body.username}` });
     }
-    const user = insertUser(db, body.username, await hashPassword(body.password), "user");
+    const role = (body as { role?: string }).role === "viewer" ? "viewer" : "editor";
+    const user = insertUser(db, body.username, await hashPassword(body.password), role);
+    audit(req, "user_create", "user", user.id, { username: user.username, role });
     return reply.code(200).send({ id: user.id, username: user.username, role: user.role });
   });
 
@@ -187,6 +207,7 @@ export async function buildApp(opts: AppOptions = {}) {
     if (!target) return reply.code(404).send({ error: `user ${id} not found` });
     if (target.role === "admin") return reply.code(422).send({ error: "cannot disable admin" });
     setUserDisabled(db, target.id, !target.disabled);
+    audit(req, "user_disable", "user", target.id, { username: target.username, disabled: !target.disabled });
     return { id: target.id, disabled: !target.disabled };
   });
 
@@ -200,44 +221,70 @@ export async function buildApp(opts: AppOptions = {}) {
     const target = getUser(db, Number(id));
     if (!target) return reply.code(404).send({ error: `user ${id} not found` });
     resetUserPassword(db, target.id, await hashPassword(body.password));
+    audit(req, "user_reset_password", "user", target.id, { username: target.username });
     return { ok: true };
   });
 
   // ===== 隔离语义（M6/U2：N4-N5——401 认证挑战 / 404 不泄漏存在性；admin 读全量写同人）=====
 
-  function actor(req: unknown): { id: number; role: "admin" | "user" } {
-    return (req as { user: { id: number; role: "admin" | "user" } }).user;
+  function actor(req: unknown): { id: number; role: Role; username: string } {
+    return (req as { user: { id: number; role: "admin" | "editor" | "viewer"; username: string } }).user;
   }
 
-  /** 读守卫：返回记录或 null；admin 全见，user 只见自己的（null=404）。 */
+  function audit(req: unknown, action: string, rType: string, rId: string | number, detail?: unknown): void {
+    const u = actor(req);
+    insertAudit(db, u.id, u.username, action, rType, rId, detail);
+  }
+
+  // ===== 角色权限矩阵（M7/V2，PRD 定型：O1-O3）=====
+
+  type Role = "admin" | "editor" | "viewer";
+
+  /** 读：admin 全见；editor/viewer 只见自己的（O1）。 */
+  function canRead(u: { role: Role; id: number }, ownerId: number | null): boolean {
+    if (u.role === "admin") return true;
+    return ownerId === u.id;
+  }
+
+  /** 写（内容）：仅 owner 本人（admin 也不修改他人内容——O3）。 */
+  function canWrite(u: { role: Role; id: number }, ownerId: number | null): boolean {
+    if (u.role === "viewer") return false;
+    return ownerId === u.id;
+  }
+
+  /** 上传/拉取/定版：editor+（viewer 纯只读——O1）。 */
+  function canCreate(u: { role: Role }): boolean {
+    return u.role !== "viewer";
+  }
+
+  /** 管道触发：admin 可触发任何人的（运维）；editor 只触发自己的（O3）。 */
+  function canTrigger(u: { role: Role; id: number }, ownerId: number | null): boolean {
+    if (u.role === "admin") return true;
+    if (u.role === "viewer") return false;
+    return ownerId === u.id;
+  }
+
   function visibleDataset(req: unknown, id: number): DatasetRecord | null {
     const rec = getDataset(db, id);
-    if (!rec) return null;
-    const u = actor(req);
-    if (u.role !== "admin" && rec.owner_id !== u.id) return null;
+    if (!rec || !canRead(actor(req), rec.owner_id)) return null;
     return rec;
   }
 
-  /** 写守卫：即使 admin 也只能操作自己的（PRD diff 3）。 */
   function writableDataset(req: unknown, id: number): DatasetRecord | null {
     const rec = getDataset(db, id);
-    if (!rec) return null;
-    if (rec.owner_id !== actor(req).id) return null;
+    if (!rec || !canWrite(actor(req), rec.owner_id)) return null;
     return rec;
   }
 
   function visiblePipeline(req: unknown, id: number): PipelineRecord | null {
     const p = getPipeline(db, id);
-    if (!p) return null;
-    const u = actor(req);
-    if (u.role !== "admin" && p.owner_id !== u.id) return null;
+    if (!p || !canRead(actor(req), p.owner_id)) return null;
     return p;
   }
 
   function writablePipeline(req: unknown, id: number): PipelineRecord | null {
     const p = getPipeline(db, id);
-    if (!p) return null;
-    if (p.owner_id !== actor(req).id) return null;
+    if (!p || !canTrigger(actor(req), p.owner_id)) return null;
     return p;
   }
 
@@ -261,7 +308,6 @@ export async function buildApp(opts: AppOptions = {}) {
   app.get("/api/auth/setup-status", async () => ({ needs_setup: userCount(db) === 0 }));
 
   app.post("/api/auth/setup", async (req, reply) => {
-    if (userCount(db) > 0) return reply.code(409).send({ error: "setup already done" });
     const body = req.body as { username?: string; password?: string } | null | undefined;
     if (!body?.username || !body?.password) {
       return reply.code(400).send({ error: "username and password required" });
@@ -270,7 +316,9 @@ export async function buildApp(opts: AppOptions = {}) {
     if (uErr) return reply.code(422).send({ error: uErr });
     const pErr = validatePassword(body.password);
     if (pErr) return reply.code(422).send({ error: pErr });
-    const user = insertUser(db, body.username, await hashPassword(body.password), "admin");
+    const hash = await hashPassword(body.password); // V5-③：先 hash——count 与 insert 间无异步窗口
+    if (userCount(db) > 0) return reply.code(409).send({ error: "setup already done" });
+    const user = insertUser(db, body.username, hash, "admin");
     backfillOwnerToAdmin(db); // 存量数据归属首管理员（幂等）
     const token = sessionKey.sign({ uid: user.id, exp: Date.now() + SESSION_TTL_MS });
     return reply.header("set-cookie", sessionCookie(token)).send({ id: user.id, username: user.username, role: user.role });
@@ -282,15 +330,25 @@ export async function buildApp(opts: AppOptions = {}) {
       return reply.code(400).send({ error: "username and password required" });
     }
     const user = getUserByName(db, body.username);
-    if (!user || !(await verifyPassword(user.password_hash, body.password))) {
+    // V5-④：不存在用户也做哑哈希恒时 verify——消除用户名枚举 timing 侧信道
+    const ok = user
+      ? await verifyPassword(user.password_hash, body.password)
+      : await verifyPassword(DUMMY_ARGON2_HASH, body.password);
+    if (!user || !ok) {
       return reply.code(401).send({ error: "用户名或密码错误" });
     }
     if (user.disabled) return reply.code(401).send({ error: "账号已停用" });
     const token = sessionKey.sign({ uid: user.id, exp: Date.now() + SESSION_TTL_MS });
+    insertAudit(db, user.id, user.username, "login", "user", user.id);
     return reply.header("set-cookie", sessionCookie(token)).send({ id: user.id, username: user.username, role: user.role });
   });
 
-  app.post("/api/auth/logout", async (_req, reply) => {
+  app.post("/api/auth/logout", async (req, reply) => {
+    const payload = sessionKey.verify(readSessionToken(req));
+    if (payload) {
+      const u = getUser(db, payload.uid);
+      if (u) insertAudit(db, u.id, u.username, "logout", "user", u.id);
+    }
     return reply.header("set-cookie", clearSessionCookie()).send({ ok: true });
   });
 
@@ -318,12 +376,13 @@ export async function buildApp(opts: AppOptions = {}) {
     if (!payload) return reply.code(401).send({ error: "not logged in" });
     const user = getUser(db, payload.uid);
     if (!user || user.disabled) return reply.code(401).send({ error: "not logged in" });
-    (req as unknown as { user: typeof user }).user = user;
+    (req as unknown as { user: typeof user & { username: string } }).user = user;
   });
 
   app.get("/api/health", async () => ({ status: "ok", engine: engineManager.running }));
 
   app.post("/api/datasets", async (req, reply) => {
+    if (!canCreate(actor(req))) return reply.code(403).send({ error: "viewer cannot upload" });
     const file = await req.file();
     if (!file) {
       return reply.code(400).send({ error: "missing file field" });
@@ -387,6 +446,7 @@ export async function buildApp(opts: AppOptions = {}) {
         quality,
       });
 
+      audit(req, "dataset_upload", "dataset", rec.id, { name: rec.name, rows: rowCount, format: ext });
       insertVersion(db, {
         dataset_id: rec.id, kind: "raw", file_path: rawPath,
         source_run_id: null, rows: rowCount,
@@ -405,7 +465,7 @@ export async function buildApp(opts: AppOptions = {}) {
     const u = actor(req);
     const all = listDatasets(db);
     // admin 全见（审计）；user 只见自己的
-    const visible = u.role === "admin" ? all : all.filter((d) => d.owner_id === u.id);
+    const visible = all.filter((d) => canRead(u, d.owner_id));
     return { datasets: visible.map(toApi) };
   });
 
@@ -474,6 +534,7 @@ export async function buildApp(opts: AppOptions = {}) {
     }
     const client = await engineManager.ensureEngine();
     const entries = await client.applyOperations(rec.project_id, body.operations);
+    audit(req, "operations_apply", "dataset", rec.id, { count: body.operations.length });
     return { entries, history: await client.getHistory(rec.project_id) };
   });
 
@@ -495,6 +556,7 @@ export async function buildApp(opts: AppOptions = {}) {
     }
     const client = await engineManager.ensureEngine();
     await client.undoRedo(rec.project_id, body.lastDoneID!);
+    audit(req, "history_restore", "dataset", rec.id, { lastDoneID: body.lastDoneID });
     return client.getHistory(rec.project_id);
   });
 
@@ -569,7 +631,7 @@ export async function buildApp(opts: AppOptions = {}) {
         file: sourceFile,
         recipe: pipeline.recipe,
         out_path: tempOut,
-        engine_url: `http://127.0.0.1:${ENGINE_PORT}`,
+        engine_url: `http://127.0.0.1:${engineManager.port}`,
       })) as {
         status: string; error?: string; dagster_run_id?: string; output_file?: string;
         rows?: number;
@@ -614,6 +676,7 @@ export async function buildApp(opts: AppOptions = {}) {
     : startScheduler(db, (pipeline, runId) => executePipelineRun(pipeline, runId));
 
   app.post("/api/pipelines", async (req, reply) => {
+    if (!canCreate(actor(req))) return reply.code(403).send({ error: "viewer cannot create pipelines" });
     const body = req.body as {
       dataset_id?: number; name?: string; interval_minutes?: number | null;
     } | null | undefined;
@@ -637,13 +700,14 @@ export async function buildApp(opts: AppOptions = {}) {
       owner_id: actorP.id,
       dataset_id: ds.id, name: String(body.name), recipe, interval_minutes: interval,
     });
+    audit(req, "pipeline_create", "pipeline", pipeline.id, { name: pipeline.name, dataset: ds.id });
     return reply.code(200).send(toPipelineApi(pipeline));
   });
 
   app.get("/api/pipelines", async (req) => {
     const u = actor(req);
     const all = listPipelines(db);
-    const visible = u.role === "admin" ? all : all.filter((p) => p.owner_id === u.id);
+    const visible = all.filter((p) => canRead(u, p.owner_id));
     return {
       pipelines: visible.map((p) => ({
         ...toPipelineApi(p),
@@ -663,6 +727,7 @@ export async function buildApp(opts: AppOptions = {}) {
       return reply.code(409).send({ error: "a run of this pipeline is already in progress" });
     }
     const run = insertRun(db, pipeline.id);
+    audit(req, "pipeline_trigger", "pipeline", pipeline.id, { run_id: run.id });
     executePipelineRun(pipeline, run.id).catch((e) => {
       // finishRun 再抛（如 SQLite 故障）不应成为 unhandled rejection（REVIEW 轮 2）
       console.error(`[trigger] run ${run.id} finalization failed:`, e);
@@ -728,7 +793,11 @@ export async function buildApp(opts: AppOptions = {}) {
         },
       };
     });
-    return { dataset: { id: rec.id, name: rec.name }, versions };
+    return {
+      dataset: { id: rec.id, name: rec.name },
+      versions,
+      recent_audit: listAuditForResource(db, "dataset", String(rec.id), 5),
+    };
   });
 
   // ===== 聚类相似值（M5/S3：S0 契约的 API 化）=====
@@ -777,6 +846,7 @@ export async function buildApp(opts: AppOptions = {}) {
   });
 
   app.post("/api/sources/db", async (req, reply) => {
+    if (!canCreate(actor(req))) return reply.code(403).send({ error: "viewer cannot fetch from db" });
     const body = req.body as {
       kind?: string; params?: Record<string, string>; table?: string; query?: string; name?: string;
     } | null | undefined;
@@ -843,6 +913,7 @@ export async function buildApp(opts: AppOptions = {}) {
         dataset_id: rec.id, kind: "raw", file_path: finalCsv,
         source_run_id: null, rows: rowCount,
       });
+      audit(req, "db_fetch", "dataset", rec.id, { kind: body.kind, source: body.table ?? "query" });
       return reply.code(200).send(toApi(getDataset(db, rec.id)!));
     } catch (err) {
       await client.deleteProject(projectId).catch(() => undefined);
