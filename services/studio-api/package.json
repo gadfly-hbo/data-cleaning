@@ -5,19 +5,19 @@
   "type": "module",
   "description": "数据清洗平台 API：数据集接入、画像/规则编排、OpenRefine 引擎生命周期托管",
   "scripts": {
-    "test": "vitest run; s=$?; pkill -9 -f \"data-cleaning/workspace/engine-data.*com.google.refine.Refine\" >/dev/null 2>&1; exit $s",
+    "test": "vitest run; s=$?; pkill -15 -f \"data-cleaning/workspace/engine-data.*com.google.refine.Refine\" >/dev/null 2>&1; sleep 2; pkill -9 -f \"data-cleaning/workspace/engine-data.*com.google.refine.Refine\" >/dev/null 2>&1; exit $s",
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts"
   },
   "dependencies": {
     "@data-cleaning/adapter-openrefine": "*",
+    "tsx": "^4.19.0",
     "@fastify/multipart": "^9.0.0",
     "@fastify/static": "^8.0.0",
     "fastify": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   }

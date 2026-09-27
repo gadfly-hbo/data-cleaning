@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   applyOperations,
+  computeClusters,
   createPipeline,
   getLlmStatus,
   suggestColumn,
@@ -19,7 +20,7 @@ import {
 } from "../api.js";
 import { PreviewTable } from "./PreviewTable.js";
 
-type Mode = "replace" | "transform";
+type Mode = "replace" | "transform" | "cluster";
 
 const ENGINE_CONFIG = { facets: [], mode: "row-based" } as const;
 
@@ -36,11 +37,16 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<History | null>(null);
   const [previewKey, setPreviewKey] = useState(0); // 操作后强制刷新预览
+  const [clusterGroups, setClusterGroups] = useState<Array<Array<{ v: string; c: number }>> | null>(null);
+  const [clusterChecked, setClusterChecked] = useState<Record<number, string>>({});
+  const [clusterBusy, setClusterBusy] = useState(false);
+  const [clusterError, setClusterError] = useState<string | null>(null);
+  const [clustererAlt, setClustererAlt] = useState(false);
   const [promoteName, setPromoteName] = useState(`${dataset.name}-pipeline`);
   const [promoteInterval, setPromoteInterval] = useState("");
   const [promoted, setPromoted] = useState<string | null>(null);
   const [promoteError, setPromoteError] = useState<string | null>(null);
-  const [llmStatus, setLlmStatus] = useState<{ enabled: boolean; model: string | null; host: string | null } | null>(null);
+  const [llmStatus, setLlmStatus] = useState<{ enabled: boolean; degraded?: boolean; model: string | null; host: string | null } | null>(null);
   const [llmSuggestions, setLlmSuggestions] = useState<unknown[] | null>(null);
   const [llmChecked, setLlmChecked] = useState<Record<number, boolean>>({});
   const [llmBusy, setLlmBusy] = useState(false);
@@ -174,6 +180,51 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
     });
   }
 
+  async function loadClusters() {
+    setClusterBusy(true);
+    setClusterError(null);
+    setClusterGroups(null);
+    setClusterChecked({});
+    try {
+      // 两种聚类器二选一（L1）：默认 binning/fingerprint；勾选"换一种"切 knn/levenshtein
+      const groups = await computeClusters(dataset.id, column, clustererAlt
+        ? { type: "knn", function: "levenshtein" }
+        : undefined);
+      setClusterGroups(groups);
+      const defaults: Record<number, string> = {};
+      groups.forEach((g, i) => {
+        defaults[i] = [...g].sort((a, b) => b.c - a.c)[0]?.v ?? "";
+      });
+      setClusterChecked(defaults);
+    } catch (err) {
+      setClusterError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setClusterBusy(false);
+    }
+  }
+
+  async function applyClusterMerge() {
+    const edits: Array<{ from: string[]; to: string }> = [];
+    clusterGroups?.forEach((g, i) => {
+      const target = clusterChecked[i];
+      if (!target || target === "") return;
+      const from = g.map((m) => m.v).filter((v) => v !== target);
+      if (from.length > 0) edits.push({ from, to: target });
+    });
+    if (edits.length === 0) return;
+    await guarded(async () => {
+      await applyOperations(dataset.id, [{
+        op: "core/mass-edit",
+        engineConfig: ENGINE_CONFIG,
+        columnName: column,
+        expression: "value",
+        edits,
+      }]);
+      setClusterGroups(null);
+      setClusterChecked({});
+    });
+  }
+
   async function promote() {
     setBusy(true);
     setPromoteError(null);
@@ -218,7 +269,7 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
         <div className="flex items-center gap-2 flex-wrap mb-3">
           <span className="font-semibold">清洗操作</span>
           <div className="flex gap-1.5">
-            {(["replace", "transform"] as const).map((m) => (
+            {(["replace", "transform", "cluster"] as const).map((m) => (
               <button
                 key={m}
                 type="button"
@@ -227,7 +278,7 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
                 className={`chip ${mode === m ? "chip-accent" : "bg-surface text-text-2 border-border"} cursor-pointer`}
                 aria-pressed={mode === m}
               >
-                {m === "replace" ? "值替换" : "文本变换"}
+                {m === "replace" ? "值替换" : m === "transform" ? "文本变换" : "聚类合并"}
               </button>
             ))}
           </div>
@@ -341,6 +392,72 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
             </>
           )}
 
+          {mode === "cluster" ? (
+            <div className="grid gap-2.5" data-testid="cluster-panel">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button type="button" className="btn-primary" disabled={busy || clusterBusy} onClick={() => void loadClusters()} data-testid="cluster-load">
+                  {clusterBusy ? "计算中…" : `对「${column}」查找相似值`}
+                </button>
+                <label className="flex items-center gap-1.5 text-[11.5px] text-text-2 cursor-pointer">
+                  <input type="checkbox" checked={clustererAlt} onChange={(e) => setClustererAlt(e.target.checked)} />
+                  换一种算法（knn/编辑距离）
+                </label>
+                <span className="text-[10.5px] text-text-2">合并作为普通操作进历史，可回滚</span>
+              </div>
+              {clusterError && (
+                <div className="card p-2.5 bg-fail-soft border-fail-line text-fail">{clusterError}</div>
+              )}
+              {clusterGroups && clusterGroups.length === 0 && (
+                <div className="text-text-2 text-[11.5px]">该列未发现相似值分组。</div>
+              )}
+              {clusterGroups && clusterGroups.length > 0 && (
+                <>
+                  <div className="grid gap-1.5 max-h-[320px] overflow-y-auto">
+                    {clusterGroups.map((g, i) => (
+                      <div key={i} className="flex items-center gap-2 px-2.5 py-1.5 rounded-sm border border-border bg-surface flex-wrap">
+                        <input
+                          type="checkbox"
+                          className="w-max"
+                          checked={clusterChecked[i] !== undefined && clusterChecked[i] !== ""}
+                          onChange={(e) =>
+                            setClusterChecked((prev) => {
+                              const next = { ...prev };
+                              if (e.target.checked) next[i] = [...g].sort((a, b) => b.c - a.c)[0]?.v ?? "";
+                                  else delete next[i];
+                                  return next;
+                                })
+                          }
+                        />
+                        {g.map((m) => (
+                          <span key={m.v} className="chip bg-surface-2 text-text-2 border-border mono max-w-[180px] truncate">
+                            {m.v}<span className="text-text-3"> ×{m.c}</span>
+                          </span>
+                        ))}
+                        <input
+                          className="border border-border rounded-sm bg-surface px-2 py-1 text-[12.5px] ml-auto w-40"
+                          value={clusterChecked[i] ?? ""}
+                          placeholder="合并为…"
+                          disabled={clusterChecked[i] === undefined || clusterChecked[i] === ""}
+                          onChange={(e) => setClusterChecked((prev) => ({ ...prev, [i]: e.target.value }))}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={busy || clusterBusy || Object.values(clusterChecked).filter(Boolean).length === 0}
+                      onClick={() => void applyClusterMerge()}
+                      data-testid="cluster-apply"
+                    >
+                      应用合并（{Object.values(clusterChecked).filter(Boolean).length} 组）
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -353,6 +470,7 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
             </button>
             <span className="text-[10.5px] text-text-2">应用后可在下方预览确认，历史面板可随时回滚</span>
           </div>
+          )}
         </div>
       </div>
 
@@ -427,8 +545,12 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
           <div className="text-text-3">加载中…</div>
         ) : !llmStatus.enabled ? (
           <div className="text-text-2 text-[11.5px]" data-testid="llm-hint">
-            可选功能未启用：在 studio-api 侧设置环境变量 <span className="mono">LLM_BASE_URL</span> 与{" "}
-            <span className="mono">LLM_API_KEY</span> 后重启。启用后仅发送列名与少量样本值到你所配置的服务。
+            {llmStatus.degraded ? (
+              <>LLM 配置存在错误（LLM_BASE_URL 不是合法 URL）——已按未启用降级，检查服务端日志后重启。启用后仅发送列名与少量样本值到你所配置的服务。</>
+            ) : (
+              <>可选功能未启用：在 studio-api 侧设置环境变量 <span className="mono">LLM_BASE_URL</span> 与{" "}
+              <span className="mono">LLM_API_KEY</span> 后重启。启用后仅发送列名与少量样本值到你所配置的服务。</>
+            )}
           </div>
         ) : llmSuggestions === null ? (
           <div className="text-text-2 text-[11.5px]">选择上方列后点击获取——建议仅供预览，勾选后才应用到数据。</div>

@@ -6,8 +6,12 @@ requires-python = ">=3.12"
 dependencies = [
     "dagster>=1.13.24",
     "fastexcel>=0.21.0",
+    "greenlet>=3.5.6",
     "pandera>=0.20",
     "polars>=1.0",
+    "psycopg[binary]>=3.3.6",
+    "pymysql>=1.2.3",
+    "sqlalchemy>=2.1.1",
 ]
 
 [dependency-groups]

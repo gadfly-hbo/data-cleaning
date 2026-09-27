@@ -155,6 +155,53 @@ export function downloadRecipe(id: number, name: string): Promise<void> {
   return download(id, "recipe", `${name}.recipe.json`);
 }
 
+export interface ClusterMember { v: string; c: number }
+
+export async function computeClusters(
+  datasetId: number,
+  column: string,
+  clusterer?: { type?: "binning" | "knn"; function?: string },
+): Promise<ClusterMember[][]> {
+  const data = await json<{ clusters: ClusterMember[][] }>(
+    await fetch(`/api/datasets/${datasetId}/clusters`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column, ...clusterer }),
+    }),
+  );
+  return data.clusters;
+}
+
+// ===== DB 数据源接入（M5）=====
+
+export interface DbSourceInput {
+  kind: "sqlite" | "postgres" | "mysql";
+  params: Record<string, string>;
+  table?: string;
+  query?: string;
+  name?: string;
+}
+
+export async function testDbConnection(input: { kind: DbSourceInput["kind"]; params: Record<string, string> }): Promise<{ ok: boolean; error?: string }> {
+  return json<{ ok: boolean; error?: string }>(
+    await fetch("/api/sources/db/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
+export async function createDatasetFromDb(input: DbSourceInput): Promise<DatasetSummary> {
+  return json<DatasetSummary>(
+    await fetch("/api/sources/db", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  );
+}
+
 // ===== 管道与版本（M3）=====
 
 export interface Pipeline {
@@ -248,6 +295,7 @@ export async function getLineage(datasetId: number): Promise<LineageVersion[]> {
 
 export interface LlmStatus {
   enabled: boolean;
+  degraded?: boolean; // 配置了但 URL 畸形（区别于纯未配置）
   model: string | null;
   host: string | null;
 }

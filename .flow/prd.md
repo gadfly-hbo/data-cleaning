@@ -1,91 +1,92 @@
-# PRD — M4：生产化补课（xlsx 完整支持 + 血缘审计 + LLM 清洗建议）
+# PRD — M5：DB 直连接入 + 聚类去重 + 容器化 + M4 清偿
 
 > 规格事实源：`.flow/proposal.md`（最高优先，含范围裁剪决策）。发布方式：无 issue tracker，写入 `.flow/prd.md`。
-> 红队：`.flow/red-team.md`（verdict go；切片 0 = xlsx 转换全链路实测；LLM stub 化；熔断保底 = xlsx+孤儿清扫）。
+> 红队：`.flow/red-team.md`（verdict go；切片 0 = compute-clusters 契约实测；切片 1 = 驱动矩阵试装+许可证；容器化独立可弃；熔断保底 = 聚类+清偿）。
 
 ## Problem Statement
 
-三条欠账：① M1 承诺的 XLSX 支持在引擎链路从未真实（M3 轮 3 暴露，现为"画像可用、清洗 422"的半残状态）；② 管道与版本跑起来了，但"这个版本是哪次运行产出、用了什么 Recipe"要查数据库才能回答——血缘不可见；③ 数据清洗平台没有智能辅助，差异化停留在架构层。另有一组生产化小债（孤儿项目、防御边界、daemon 决策记录）。
+三个缺口：① 数据在数据库里的用户必须先手工导出 CSV 才能进平台；② 相似值去重（"北京市朝阳区" vs "北京 朝阳区"）目前只能靠肉眼在 top 值里碰运气；③ 产品没有可复制的部署形态（clone 后要手工装 Node/JRE/Python 三套运行时）。另有 M4 审查移交的五条小债。
 
 ## Solution
 
-xlsx 经 pybridge 转换为规范 CSV 后进引擎获得全功能（raw 版本仍存 xlsx 原件）；血缘聚合端点 + 前端视图把 数据集→管道→运行→版本 链路可视化；LLM 建议面板对选中列生成可预览、人工确认应用的清洗操作 JSON（用户自配 OpenAI 兼容端点，默认关闭，边界常驻声明）；生产化补课闭环。
+pybridge 直连数据库（SQLite/PostgreSQL/MySQL）把整表或 SQL 结果物化为 CSV，经现有上传链路注册数据集（全链路复用）。工作台新增「聚类合并」：引擎聚类端点对选定列返回相似值分组，预览勾选后生成 mass-edit 应用（历史/回滚/管道同构免费获得）。单 Dockerfile 多阶段构建交付完整服务。五条清偿项闭环。
 
 ## User Stories
 
 业务分析人员（最终用户）：
 
-1. 作为业务分析人员，我要上传 XLSX 并获得与 CSV 完全等价的功能（预览/清洗/管道/版本/导出），以便不必先手工转格式。
-2. 作为业务分析人员，我要在数据集详情看到血缘视图（版本来自哪次运行、运行属于哪条管道、Recipe 步骤数、前后质量摘要），以便回答"这个数据从哪来、被怎么处理过"。
-3. 作为业务分析人员，配置了 LLM 端点后，我要对选中列请求清洗建议，看到建议的操作预览（GREL/替换映射），确认后一键应用，以便不知道 GREL 语法也能做复杂清洗。
-4. 作为业务分析人员，LLM 功能未配置/失败时要得到明确状态与指引，数据与流程不受影响。
-5. 作为业务分析人员，界面要常驻声明 LLM 启用时"列名与样本值会发送到你所配置的服务"，以便知情掌控数据边界。
+1. 作为业务分析人员，我要填数据库连接（类型/主机/库名/凭据）并测试连通，以便确认能访问我的数据。
+2. 作为业务分析人员，我要选择整表或输入 SQL，把结果拉进平台成为数据集，后续画像/质量/清洗/管道与上传文件完全一致。
+3. 作为业务分析人员，我要在工作台对选定列点「查找相似值」，看到聚类分组（每组：代表值 + 成员 + 计数），以便发现"北京市朝阳区/北京 朝阳区"这类变体。
+4. 作为业务分析人员，我要勾选组内合并目标值后应用，合并作为普通操作进历史、可回滚、可进管道。
+5. 作为业务分析人员，DB 拉取失败（连不上/SQL 错）要得到明确错误，不留半成品。
+6. 作为业务分析人员，数据库密码不能被保存或出现在日志里（一次性行为，用完即弃）。
 
 平台开发者（我方）：
 
-6. 作为平台开发者，xlsx→csv 转换的类型口径要有测试锁定（日期 ISO 化、数字保形、空值、中文），转换后全链路等价性由集成测试保证。
-7. 作为平台开发者，studio-api 启动时清扫孤儿引擎项目（无 dataset 行引用的项目），执行器 SIGKILL 泄漏不再累积。
-8. 作为平台开发者，LLM 建议端点要可 stub 测试（不依赖真实密钥），输出经 JSON 校验，失败结构化。
-9. 作为平台开发者，dagster-daemon 维持方案 B 的决策要有记录（结论+依据），后续生产化再评估有据可查。
-10. 作为平台开发者，export-rows 罕见边界（200+JSON 错误体）在双客户端有防御（检测非 CSV 输出即抛错）。
+7. 作为平台开发者，compute-clusters 契约要有常驻测试（聚类器×响应形态×性能），未实测债清零。
+8. 作为平台开发者，DB 驱动矩阵的许可证要逐个核查入库（uv.lock + 记录）。
+9. 作为平台开发者，`docker build` 产出可运行镜像（一条命令起服务），README 有部署节。
+10. 作为平台开发者，M4 轮 3 五条清偿项全部闭环（见 Implementation Decisions 末）。
+11. 作为平台开发者，连接参数不落盘、不进日志；SQL 拉取设置只读语义（无写操作面——引擎只读查询）。
 
 ## Implementation Decisions
 
-- **xlsx 路线（proposal 已定）**：pybridge 新增 `xlsx_to_csv` 纯函数（polars 读→规范化写 CSV）；studio-api 上传 xlsx 时：raw 版本存 xlsx 原件（不可变字节），转换产物存 `workspace/datasets/<hash>/engine.csv`，引擎项目以该 CSV 注册——xlsx 从此全功能。类型口径：日期/Datetime → ISO-8601 字符串；空值 → 空字段；多 sheet → 明确 422（仅首 sheet，沿用 M1 约定）。M3 的 xlsx 422 分流与前端特判全部移除。
-- **血缘聚合端点**：`GET /api/datasets/:id/lineage` → `{versions:[{version,kind,rows,created_at,run?{id,status,pipeline{name},started_at,recipe_steps,quality_summary{before_total,after_total,delta}}}]}`（一次组装，无新表）。
-- **血缘视图**：详情页「版本」tab 内嵌升级——每个 pipeline 版本行展开运行/管道/Recipe 步数/质量摘要；不建独立页（信息与版本天然同源）。
-- **LLM 建议**：
-  - 配置：`LLM_BASE_URL` + `LLM_API_KEY`（env，studio-api 启动读取）；未配置 → 建议端点返回 `{enabled:false}`，前端显示配置指引。
-  - 请求：OpenAI 兼容 `POST {base}/chat/completions`（模型 `LLM_MODEL`，默认 `gpt-4o-mini`）；payload 仅含列名、dtype、画像摘要、top 值（≤8 个）；system prompt 约定只回 JSON 数组（mass-edit/text-transform 操作）。
-  - 响应：TS 侧 JSON 解析+结构校验（op 白名单）；非法 → 422 结构化（含原始文本片段）；合法建议经**现有** `POST /operations` 应用（用户在 UI 预览每条建议并勾选）。
-  - 边界：建议面板常驻 chip「启用中：列名与样本值将发送到 <host>」；请求/响应不落盘。
-- **孤儿清扫**：studio-api 启动时（failStaleRuns 之后）list engine projects → 无对应 datasets 行引用且名称为 `pipeline-temp` 前缀的项目 → deleteProject；失败仅记日志。
-- **export-rows 防御**：TS/py 两客户端检测响应 content-type 或首字符 `{`/`<` 即抛结构化错误（不再把错误体当 CSV）。
-- **daemon 决策记录**：`docs/design.md` 追加 M4 备注段（维持方案 B 的依据：单用户本地、无常驻运维、调度精度需求低；触发重评条件：多用户/远程部署/秒级调度）。
+- **DB 接入（直连路线，proposal 已定）**：pybridge 新增 `db_fetch` 任务：stdin `{task, kind: sqlite|postgres|mysql, dsn 或离散参数, table? , query?, out_csv}` → sqlalchemy create_engine（`sqlite+sqlite3` / `postgresql+psycopg` / `mysql+pymysql`，许可证核查后定）→ `read_sql` → 写 CSV（原子写，同 convert 口径）→ stdout `{rows, columns}`。studio-api `POST /api/sources/db`：body `{kind, params, table?|query?, name?}` → 校验 → runPybridge db_fetch 到内容寻址目录 → 走与文件上传完全相同的注册链路（引擎项目/raw v1/画像/质量）。**连接信息仅存在于请求内存中**：不写库、不打日志（request body 以 `[REDACTED]` 记录）、错误消息不回显密码。
+- **驱动矩阵与依赖**：sqlalchemy（MIT）+ psycopg[binary]（LGPL-3——纯客户端使用合规，记录）或 asyncpg（Apache-2，若 psycopg 许可证被否决）+ pymysql（MIT）。切片 1 试装定案入 uv.lock。
+- **聚类合并（dedupe）**：
+  - adapter 新增 `computeClusters(projectId, columnName, clusterer, params)`——POST `/command/core/compute-clusters`（契约形态切片 0 实测定型后固化）。
+  - studio-api `POST /api/datasets/:id/clusters` `{column, clusterer?}` → 返回分组数组；前端「聚类合并」面板：选列 → 请求 → 组卡片（勾选整组、每组目标值可改为组内代表或自定义）→「应用合并」把勾选组装成一个 mass-edit 操作经现有 `POST /operations` 提交。
+  - 默认聚类器与参数（fingerprint/key-collision 类）以切片 0 实测效果定；UI 不暴露全部参数（高级参数留 API）。
+- **容器化**：单 Dockerfile 多阶段（builder: node+npm install/build web + uv sync pybridge；runtime: node slim + JRE（temurin 21 jre apt 层）+ 复制 workspace 引擎资产 or 首启 setup-engine 下载——以构建实验定，倾向构建期下载保证镜像开箱即用）+ `docker compose` 样例（卷挂 workspace）+ README 部署节。健康检查 /api/health。
+- **M4 轮 3 清偿五项**：
+  1. 冷启动重叠窗口：startEngine 探测复用时，若本地 spawn 的 child 已早退（绑定失败）转判复用语义（child=null + reused=true）。
+  2. pkill 兜底 -9 → -15 优先（`pkill -15 ... ; sleep 2; pkill -9 ... || true`）。
+  3. 畸形 LLM_BASE_URL：降级分支补单测；前端 status 区分「未配置」与「配置错误」。
+  4. _jsonify 双份合并到 pybridge/common.py，profile/rules/pipeline 统一引用。
+  5. TERM 落盘完整性实验：adapter 契约测试新增「apply → stop → start → 数据/历史完好」断言（轮 1 对照实验的常驻化）。
 
 ## Testing Decisions
 
-- 只测外部行为；seam：pybridge `xlsx_to_csv`（CLI 协议）、studio-api 血缘/建议端点（HTTP）、前端组件（fetch 边界）。
-- xlsx 等价：构造覆盖 日期/数字/空值/中文/公式值（calamine 读值） 的 xlsx 夹具 → 转换断言 → 上传 → 清洗（mass edit）→ 管道运行 → 版本导出，全链路集成测试。
-- 血缘端点：造 raw+两次 pipeline run（一 ok 一 fail）→ 断言链路字段完整。
-- LLM：stub `LLM_BASE_URL`（本地 http stub 返回固定建议 JSON/非法 JSON/超时三形态）→ 建议端点行为锁定；前端建议面板组件测试（预览/勾选/应用分发）。
-- 孤儿清扫：预插孤儿项目（直接 engine client 建）→ buildApp → 项目消失。
-- 浏览器手动端到端（xlsx 上传→清洗→管道；LLM 面板边界文案）记录进 tasks.md。
+- 只测外部行为；seam：pybridge `db_fetch`/`rows` CLI 协议、adapter `computeClusters` 公共接口、studio-api sources/clusters 端点（HTTP）、前端组件（fetch 边界）。
+- db_fetch：临时 SQLite 文件夹具（建表+数据）→ 整表/SQL/失败（坏 DSN、坏 SQL）四形态；PG/MySQL 若本机无服务则驱动级冒烟（import + DSN 构造）+ 文档标注（真实服务验证留用户环境）。
+- clusters：真实引擎契约测试（messy 夹具 city 列——广州市/上海 等已知相似值断言分组行为）；API 端点集成（返回分组结构）；前端聚类面板组件测试（分组渲染/勾选/合并提交体）。
+- 容器化：构建成功 + 容器内 /api/health 200 + 上传冒烟（如 CI/docker 环境可用；本机 docker 不可用则 Dockerfile 静态审查 + 记录未验证）。
+- 清偿项：各配一条测试或修正既有测试（pkill 语义/LLM 状态/TERM 落盘实验常驻化）。
+- 浏览器手动端到端（DB 接入→画像；聚类预览→合并→回滚）记录进 tasks.md。
 
 ## Out of Scope
 
-- 多源接入（SeaTunnel/DataX）→ M5；dedupe 实体匹配 → M5；多用户/RBAC/Docker 分发 → M5+。
-- LLM 对话式交互/多轮上下文/自动执行建议（永远人工确认）；LLM 服务代理或内置密钥。
-- xlsx 多 sheet/样式/公式重算（读值不读式，沿用 calamine）。
-- 版本保留策略/清理（append-only 沿用）。
+- SeaTunnel/DataX 重集成（云端/多用户形态再评估）；增量同步/变更捕获（CDC）。
+- 多用户/RBAC/鉴权（M6）；数据源凭据保险库（保存连接）——M5 连接一次性。
+- 聚类参数全量 UI、自定义距离函数插件化。
+- LLM 对话式；版本保留策略。
 
 ## Further Notes
 
-- 熔断保底 =「xlsx 等价 + 孤儿清扫 + export 防御」；血缘与 LLM 为独立可弃切片。
-- LLM 真实端点体验不在自动化验收内（无密钥环境），以 stub 锁行为 + 用户配置后手动验收为口径，如实记录。
+- 熔断保底 =「聚类去重 + 五条清偿」；DB 接入与容器化按序独立可弃。
+- M4 轮 3 待确认项（TOCTOU 毫秒窗、dev 并发冷启动）不在清偿内，维持记录。
 
 ## GRILL 决议（自答，2026-09-27）
 
-零升级（实现细节级）：
+零升级（实现细节级，有可辩护推荐）：
 
-- **K1 转换口径实现**：pl.read_excel 首 sheet 原始读取（不经 loader.normalize——转换保留原值语义，trim 是画像/跑分层的事）；Date→`%Y-%m-%d`、Datetime→ISO 字符串、其余类型 polars 默认序列化；重名列按 polars 自动后缀口径（测试钉住）。
-- **K2 engine.csv 幂等**：内容寻址目录下已存在即跳过转换（同 xlsx 重传零成本）。
-- **K3 LLM prompt 与解析**：system 约定"只输出 JSON 数组，元素为 core/mass-edit 或 core/text-transform 操作对象"+两个 few-shot；解析剥 ```json 围栏 → JSON.parse → op 白名单/必填字段校验；围栏外文本/非法 JSON → 422（附原始片段前 200 字）。
-- **K4 LLM 错误形态**：未配置→{enabled:false}（200）；上游连接失败/超时（30s）→502 结构化；建议非法→422。请求响应不落盘、不打日志（样本值可能敏感）。
-- **K5 建议面板位置**：清洗 tab 操作面板下方折叠区「AI 清洗建议」：选列→请求→建议卡（类型/参数预览/勾选）→「应用所选」走现有 apply 流（复用 busy/错误/历史刷新）。未配置显示配置指引（env 变量名）。
-- **K6 quality_summary 计算**：run 的 before/after 报告 sum(violations)；fail run 无报告 → null。
-- **K7 孤儿清扫数据源**：TS client 新增 listProjectsWithNames()（get-all-project-metadata 组装）；保留名单=datasets 全部 project_id；删除对象=名字 pipeline-temp 前缀且不在保留名单。
-- **K8 export 防御实现**：TS：content-type 含 json/html 或响应体首字符 `{`/`<` → throw；py 同理（openrefine_client.export_rows_csv）。
+- **L1 聚类参数形态**：API `clusterer` 可选（默认 `fingerprint`，切片 0 实测后可改默认）；UI 只给"默认/换一种"二选一，全参数留 API。
+- **L2 DB 连接形态**：离散字段（host/port/db/user/password/file），服务端拼 DSN——避免用户提交含密码的完整 DSN 明文；SQLite 用 file 字段。
+- **L3 db_fetch 输出**：out_csv 由 studio-api 指定到内容寻址临时路径，成功后进入与上传相同的注册链路（含 hash 去重）。
+- **L4 SQL 只读保护**：query 非SELECT/WITH 开头即 422 拒绝（白名单正则）+ 文档标注"只读语义"；不做事务级只读（驱动差异大）。
+- **L5 聚类 UI 位置**：清洗 tab 操作模式新增「聚类合并」（与值替换/文本变换并列第三模式）。
+- **L6 容器内 Python 依赖**：uv sync --frozen（lock 为唯一事实源）；镜像内引擎构建期下载（setup-engine 幂等脚本复用）。
+- **L7 驱动许可证预判**：psycopg 若 LGPL-3 引发顾虑则切 asyncpg（Apache-2）；pymysql MIT——切片 1 定案并记录。
+- **L8 pkill 清偿语义**：`pkill -15 …; sleep 2; pkill -9 … || true`（TERM 优先，KILL 兜底）。
 
 ## PRD 相对 proposal 的新增/变更（diff gate 清单）
 
 全部 **additive**（裁决开放问题/细化），无对 proposal 决策的更改或删除：
 
-1. xlsx 类型口径定型：日期 ISO 化、空值空字段、多 sheet 明确 422、公式读值不读式；引擎工作文件为 `datasets/<hash>/engine.csv`。
-2. 血缘视图裁决：版本 tab 内嵌升级（不建独立页）；血缘端点响应形态定型。
-3. LLM 配置定型：env 三变量（BASE_URL/API_KEY/MODEL 默认 gpt-4o-mini）、chat completions 协议、未配置返回 enabled:false；建议经现有 operations 端点应用（无新执行面）。
-4. LLM 安全阀细化：payload 最小化（列名/dtype/摘要/top≤8）、输出 op 白名单校验、不落盘、边界 chip 显示 host。
-5. 孤儿清扫定型：启动时按"无 dataset 行引用 + pipeline-temp 前缀"判定，best-effort 删除。
-6. export-rows 防御：双客户端 content-type/首字符检测。
-7. daemon 决策：docs/design.md 追加备注段（触发重评条件写明）。
-8. M3 的 xlsx 422 分流代码与前端特判全部移除（等价后无残留）。
+1. DB 接入形态定型：三驱动矩阵（sqlite/psycopg/pymysql，许可证切片 1 定案）、连接信息一次性内存语义、错误不回显密码、复用上传注册链路。
+2. 聚类合并交互定型：组卡片勾选 + 目标值可改 → 单个 mass-edit 经现有 operations 端点；默认聚类器以切片 0 实测定；高级参数仅 API。
+3. clusters 端点形态：`POST /api/datasets/:id/clusters`。
+4. 容器化取向：多阶段单镜像 + 构建期下载引擎（构建实验定）+ compose + /api/health 健康检查；docker 不可用则静态审查+记录未验证。
+5. 清偿五项的具体修法定型（含 TERM 落盘实验常驻化为契约测试）。
+6. PG/MySQL 真实服务验证口径：本机无服务则驱动级冒烟 + 文档标注（不虚构验证）。

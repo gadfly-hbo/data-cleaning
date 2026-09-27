@@ -21,7 +21,17 @@ npm run start
 
 启用后，在数据集「清洗」tab 可对选中列请求建议（仅发送列名、类型与 ≤8 个样本值到你所配置的服务；建议经预览勾选后人工应用）。界面的边界 chip 常驻显示目标服务。
 
-后续 M5：多源接入（SeaTunnel/DataX）、dedupe 实体匹配、多用户/容器化部署（[docs/design.md](docs/design.md)）。
+**M5 已交付**：DB 数据源接入（SQLite/PostgreSQL/MySQL 直连拉取整表或 SQL，注册后全链路与上传等价）；聚类合并（相似值分组预览→勾选合并，作为普通操作可回滚）；容器化（Dockerfile + compose）。
+
+### 容器部署
+
+```bash
+docker compose up -d --build   # http://localhost:8787，workspace 卷持久化
+```
+
+镜像包含 web 产物、pybridge、OpenRefine 引擎与系统 JRE。**注意**：本 Dockerfile 在无 docker 环境下仅经静态审查，首次真实构建请在有 docker 的机器执行并反馈问题（M5 记录）。DB 接入的 PostgreSQL/MySQL 真实服务验证同样留待有对应环境的机器（本机仅 SQLite 端到端 + 驱动冒烟）。
+
+后续 M6：多用户/RBAC/鉴权、SeaTunnel/DataX 云端形态评估（[docs/design.md](docs/design.md)）。
 
 ## 架构
 

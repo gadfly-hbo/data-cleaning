@@ -5,7 +5,7 @@
   "type": "module",
   "description": "OpenRefine headless 引擎 adapter：HTTP 客户端 + 生命周期托管 + 契约测试（M0 PoC 用例集演化）",
   "scripts": {
-    "test": "vitest run; s=$?; pkill -9 -f \"data-cleaning/workspace/engine-data.*com.google.refine.Refine\" >/dev/null 2>&1; exit $s"
+    "test": "vitest run; s=$?; pkill -15 -f \"data-cleaning/workspace/engine-data.*com.google.refine.Refine\" >/dev/null 2>&1; sleep 2; pkill -9 -f \"data-cleaning/workspace/engine-data.*com.google.refine.Refine\" >/dev/null 2>&1; exit $s"
   },
   "exports": {
     ".": "./src/index.ts",

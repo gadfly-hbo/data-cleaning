@@ -152,6 +152,20 @@ test("unknown column 404; bad body 400", async () => {
   expect(res.status).toBe(400);
 });
 
+test("malformed LLM_BASE_URL degrades to disabled, not crash (M4 轮 3 清偿③)", async () => {
+  const app3 = await buildApp({
+    workspaceDir: mkdtempSync(path.join(tmpdir(), "studio-llm3-")),
+    enableScheduler: false,
+    llm: { baseUrl: "not-a-url", apiKey: "k", model: "m", timeoutMs: 500 },
+  });
+  await app3.listen({ port: 0, host: "127.0.0.1" });
+  const a = app3.server.address();
+  const base3 = typeof a === "object" && a ? `http://127.0.0.1:${a.port}` : "";
+  const status = (await (await fetch(`${base3}/api/llm/status`)).json()) as { enabled: boolean };
+  expect(status.enabled).toBe(false); // 降级为禁用而非 500/启动崩溃
+  await app3.close();
+});
+
 test("disabled when unconfigured (fresh app without llm env)", async () => {
   const previous = { ...process.env };
   delete process.env.LLM_BASE_URL;

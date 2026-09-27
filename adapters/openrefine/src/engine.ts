@@ -35,30 +35,49 @@ export interface EngineHandle {
   reused: boolean;
 }
 
-function findJreHome(): string {
-  const entries = readdirSync(JRE_DIR).filter((e) => e.startsWith("jdk"));
-  if (entries.length !== 1) {
-    throw new Error(`expected exactly one JDK dir under ${JRE_DIR}, found: ${entries.join(", ")}`);
+/**
+ * JRE resolution: prefer workspace/jre (macOS layout, installed by setup-engine);
+ * fall back to JAVA_HOME or system PATH java (container image uses openjdk-21).
+ * See M5/S5 containerization.
+ */
+function findJreHome(): string | null {
+  if (existsSync(JRE_DIR)) {
+    const entries = readdirSync(JRE_DIR).filter((e) => e.startsWith("jdk"));
+    if (entries.length === 1) {
+      const home = path.join(JRE_DIR, entries[0]!, "Contents", "Home");
+      if (existsSync(path.join(home, "bin", "java"))) {
+        return home;
+      }
+    }
   }
-  const home = path.join(JRE_DIR, entries[0]!, "Contents", "Home");
-  if (!existsSync(path.join(home, "bin", "java"))) {
-    throw new Error(`no java binary under ${home}`);
+  const envHome = process.env.JAVA_HOME;
+  if (envHome && existsSync(path.join(envHome, "bin", "java"))) {
+    return envHome;
   }
-  return home;
+  return null; // 系统 PATH 上的 java（容器/服务器形态）
 }
 
-/** 幂等安装检查：发行包与 JRE 缺失时指引到安装脚本（scripts/setup-engine.mjs 完成下载解压）。 */
+/** 幂等安装检查：发行包缺失时指引到安装脚本；JRE 快速失败见 startEngine 开头。 */
 export function ensureInstalled(): void {
   if (!existsSync(path.join(DIST, "refine"))) {
     throw new Error(
       `OpenRefine dist missing at ${DIST}. Run: node scripts/setup-engine.mjs (downloads ${OPENREFINE_URL})`,
     );
   }
-  findJreHome();
 }
 
 export async function startEngine(): Promise<EngineHandle> {
   ensureInstalled();
+  // JRE 快速失败（REVIEW 轮 1 建议 6 / 轮 3 落地）：无 workspace/jre、无 JAVA_HOME、
+  // PATH 也没有 java 时立即指引，而非 120s 超时 + 泛化报错
+  if (
+    findJreHome() === null &&
+    !process.env.PATH?.split(":").some((p) => existsSync(path.join(p, "java")))
+  ) {
+    throw new Error(
+      "no java found: run node scripts/setup-engine.mjs (installs workspace/jre) or install a JDK/JRE",
+    );
+  }
   // 先探测复用：端口上已有健康引擎（如上一测试套件或外部进程遗留）直接复用，
   // 不再 spawn（spawn 会绑定失败退出，且让我们误持有"所有权"导致 stop 误杀/误查端口）
   try {
@@ -67,6 +86,9 @@ export async function startEngine(): Promise<EngineHandle> {
   } catch {
     // 端口无健康引擎——走正常启动
   }
+  // 冷启动重叠窗口（M4 轮 3 清偿①）：spawn 后若 child 因端口被占早退（他人引擎
+  // 尚在启动中），waitHealthy 会打到他人引擎成功——此时本地 child 已死，转判复用
+  // 语义，避免 stopEngine 对死 child 误查端口
   const jreHome = findJreHome();
   const log = createWriteStream(ENGINE_LOG, { flags: "a" });
   log.write(`\n===== engine start ${new Date().toISOString()} =====\n`);
@@ -78,7 +100,7 @@ export async function startEngine(): Promise<EngineHandle> {
   ], {
     env: {
       ...process.env,
-      JAVA_HOME: jreHome, // 必须绝对路径：refine 脚本在自身目录下解析相对 JAVA_HOME
+      ...(jreHome ? { JAVA_HOME: jreHome } : {}), // 本地 JRE 必须绝对路径（refine 相对路径陷阱）；null=系统 java
       REFINE_MEMORY: "2048M",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -95,6 +117,12 @@ export async function startEngine(): Promise<EngineHandle> {
     await new Promise((resolve) => setTimeout(resolve, 2_000));
     killGroup(child, "SIGKILL");
     throw err;
+  }
+  // 冷启动重叠窗口（M4 轮 3 清偿①）：本地 child 因端口被占早退（他人引擎尚在
+  // 启动中）而 waitHealthy 打到他人引擎成功——转判复用，避免 stop 误查端口
+  if (child.exitCode !== null || child.signalCode !== null) {
+    log.write(`===== engine reused (local spawn exited early) =====\n`);
+    return { child: null, port: ENGINE_PORT, reused: true };
   }
   return { child, port: ENGINE_PORT, reused: false };
 }

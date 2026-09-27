@@ -1,7 +1,8 @@
 /** studio-api 应用工厂：数据集上传/列表/详情/预览行（G2 端点）。 */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fastify from "fastify";
@@ -90,7 +91,9 @@ export async function buildApp(opts: AppOptions = {}) {
     }
   }
   const engineManager = new EngineManager();
+  const llmRequested = Boolean(opts.llm?.baseUrl || process.env.LLM_BASE_URL);
   const llmConfig = resolveLlmConfig(opts.llm);
+  const llmDegraded = llmRequested && llmConfig === null; // 配置了但畸形 URL（M4 清偿③补全）
   // 孤儿清扫（M4/Q2，K7）：首次引擎就绪后，删除无 dataset 行引用且 pipeline-temp 前缀的项目
   engineManager.onFirstReady(() => {
     void (async () => {
@@ -526,10 +529,129 @@ export async function buildApp(opts: AppOptions = {}) {
     return { dataset: { id: rec.id, name: rec.name }, versions };
   });
 
+  // ===== 聚类相似值（M5/S3：S0 契约的 API 化）=====
+
+  app.post("/api/datasets/:id/clusters", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = getDataset(db, Number(id));
+    if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
+    const body = req.body as { column?: string; type?: "binning" | "knn"; function?: string } | null | undefined;
+    if (!body || typeof body !== "object" || !body.column) {
+      return reply.code(400).send({ error: 'body must be JSON like {"column": "<列名>", "type"?, "function"?}' });
+    }
+    if (rec.project_id === 0) {
+      return reply.code(422).send({ error: "dataset has no engine project" });
+    }
+    const client = await engineManager.ensureEngine();
+    const clusters = await client.computeClusters(rec.project_id, body.column, {
+      type: body.type,
+      function: body.function,
+    });
+    return { column: body.column, clusters };
+  });
+
+  // ===== DB 数据源接入（M5/S2，L2/L3/L4：连接纯内存、复用注册链路）=====
+
+  app.post("/api/sources/db/test", async (req, reply) => {
+    // story 1 测试连通（REVIEW 轮 1 BLOCKER 5）：轻量 SELECT 1，不拉数据不注册
+    const body = req.body as { kind?: string; params?: Record<string, string> } | null | undefined;
+    if (!body || typeof body !== "object" || !body.kind || !body.params) {
+      return reply.code(400).send({ error: 'body must be JSON like {kind, params}' });
+    }
+    const probeCsv = path.join(workspace, "datasets", `.probe-${Date.now()}.csv`);
+    try {
+      const meta = (await runPybridge({
+        task: "db_fetch", kind: body.kind, params: body.params,
+        query: "SELECT 1 AS probe", out_csv: probeCsv,
+      })) as { rows: number };
+      return { ok: true, probe_rows: meta.rows };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(502).send({ ok: false, error: `connection failed: ${message.slice(0, 200)}` });
+    } finally {
+      // 探针文件必清理（REVIEW 轮 2 BLOCKER 4①：测试连通不留文件）
+      try { if (existsSync(probeCsv)) unlinkSync(probeCsv); } catch { /* best-effort */ }
+    }
+  });
+
+  app.post("/api/sources/db", async (req, reply) => {
+    const body = req.body as {
+      kind?: string; params?: Record<string, string>; table?: string; query?: string; name?: string;
+    } | null | undefined;
+    if (!body || typeof body !== "object" || !body.kind || !body.params || (!body.table && !body.query)) {
+      return reply.code(400).send({ error: 'body must be JSON like {kind, params, table?|query?, name?}' });
+    }
+    if (body.query && !/^\s*(select|with)\b/i.test(body.query)) {
+      return reply.code(422).send({ error: "query must start with SELECT or WITH (read-only)" });
+    }
+    // 连接信息只存在于本请求内存：不打日志（fastify logger 已关）、错误不回显 params
+    const outCsv = path.join(workspace, "datasets", `db-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.csv`);
+    let rows = 0;
+    let columns: string[] = [];
+    try {
+      const meta = (await runPybridge({
+        task: "db_fetch", kind: body.kind, params: body.params,
+        table: body.table, query: body.query, out_csv: outCsv,
+      })) as { rows: number; columns: string[] };
+      rows = meta.rows;
+      columns = meta.columns;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // 不回显连接参数（message 来自 pybridge，只含 DSN 无密码的异常链——db_fetch 不打印 DSN）
+      return reply.code(502).send({ error: `db fetch failed: ${message.slice(0, 300)}` });
+    }
+    if (rows === 0) {
+      try { if (existsSync(outCsv)) unlinkSync(outCsv); } catch { /* best-effort */ }
+      return reply.code(422).send({ error: "query returned 0 rows" });
+    }
+
+    // 内容寻址（REVIEW 轮 1 建议 4）：同表重复拉取复用同一目录，不再累积 db-*.csv
+    const csvHash = createHash("sha256").update(await readFile(outCsv)).digest("hex");
+    // 文件名消毒（REVIEW 轮 2 建议 5）：basename + 白名单，防路径穿越（与上传同口径）
+    const safeName = (body.name?.trim() || body.table || "db-query")
+      .split("/").pop()!.replace(/[^\w.\-\u4e00-\u9fa5]/g, "_");
+    const hashDir = path.join(workspace, "datasets", csvHash);
+    const hashPath = path.join(hashDir, `${safeName}.csv`);
+    mkdirSync(hashDir, { recursive: true });
+    if (hashPath !== outCsv) {
+      if (!existsSync(hashPath)) {
+        renameSync(outCsv, hashPath);
+      } else {
+        // 内容寻址命中：复用已有文件，新拉的 outCsv 清理（REVIEW 轮 2 BLOCKER 4③）
+        try { unlinkSync(outCsv); } catch { /* best-effort */ }
+      }
+    }
+    const finalCsv = existsSync(hashPath) ? hashPath : outCsv;
+
+    // 复用文件上传的注册链路（引擎项目/raw v1/画像/质量）
+    const name = body.name?.trim() || body.table || "db-query";
+    const client = await engineManager.ensureEngine();
+    const projectId = await client.createProject(finalCsv, name);
+    try {
+      const cols = columns.length > 0 ? columns : await client.getColumns(projectId);
+      const rowCount = await client.getRowCount(projectId);
+      const profile = await runPybridge({ task: "profile", file: finalCsv });
+      const quality = await runPybridge({ task: "rules", file: finalCsv });
+      const rec = insertDataset(db, {
+        name, file_hash: csvHash, file_path: finalCsv,
+        project_id: projectId, row_count: rowCount, columns: cols, profile, quality,
+      });
+      insertVersion(db, {
+        dataset_id: rec.id, kind: "raw", file_path: finalCsv,
+        source_run_id: null, rows: rowCount,
+      });
+      return reply.code(200).send(toApi(getDataset(db, rec.id)!));
+    } catch (err) {
+      await client.deleteProject(projectId).catch(() => undefined);
+      throw err;
+    }
+  });
+
   // ===== LLM 清洗建议（M4/Q4）=====
 
   app.get("/api/llm/status", async () => ({
     enabled: llmConfig !== null,
+    degraded: llmDegraded,
     model: llmConfig?.model ?? null,
     // 只暴露 host（边界声明用），不暴露 key/路径
     host: llmConfig ? new URL(llmConfig.baseUrl).host : null,

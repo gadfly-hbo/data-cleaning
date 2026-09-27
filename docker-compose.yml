@@ -1,0 +1,19 @@
+services:
+  data-cleaning:
+    build: .
+    image: data-cleaning:latest
+    ports:
+      - "8787:8787"
+    volumes:
+      - dc-workspace:/app/workspace
+    environment:
+      # 可选：LLM 清洗建议（默认关闭）
+      # LLM_BASE_URL: https://your-openai-compatible-endpoint/v1
+      # LLM_API_KEY: set-me
+      # LLM_MODEL: gpt-4o-mini
+      - PORT=8787
+      - HOST=0.0.0.0
+    restart: unless-stopped
+
+volumes:
+  dc-workspace:

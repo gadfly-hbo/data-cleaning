@@ -78,6 +78,32 @@ export class OpenRefineClient {
     return (cell?.v as string | undefined) ?? null;
   }
 
+  /**
+   * 聚类相似值（M5/S0 契约实测定型）：
+   * POST 表单字段 engine + clusterer（各为 JSON 字符串）；type 只认 binning|knn
+   * （旧文档的 keycollision 已改名 binning）；响应为 组数组，每组成员 {v: 值, c: 计数}。
+   * clusterer 默认 binning/fingerprint（键碰撞，性能好）；knn 可用 levenshtein|ppm。
+   */
+  async computeClusters(
+    projectId: number,
+    column: string,
+    clusterer?: { type?: "binning" | "knn"; function?: string; params?: Record<string, unknown> },
+  ): Promise<Array<Array<{ v: string; c: number }>>> {
+    const spec = {
+      type: clusterer?.type ?? "binning",
+      function: clusterer?.function ?? "fingerprint",
+      column,
+      params: clusterer?.params ?? {},
+    };
+    return (await this.postForm(
+      `/command/core/compute-clusters?project=${projectId}`,
+      {
+        engine: JSON.stringify({ facets: [], mode: "row-based" }),
+        clusterer: JSON.stringify(spec),
+      },
+    )) as Array<Array<{ v: string; c: number }>>;
+  }
+
   /** 分页读行，按列对齐成值矩阵（行尾空单元格补 null；越界自动截断）。 */
   async getRows(
     projectId: number,

@@ -1,7 +1,5 @@
 """列画像（G7 口径）：类型推断、空值率、基数、数值列分位、字符串列长度、top-k。"""
 
-from datetime import date as _date, datetime as _datetime
-
 import polars as pl
 
 TOP_K = 10
@@ -21,13 +19,7 @@ def dtype_kind(dtype: pl.DataType) -> str:
     return "string"
 
 
-def _jsonify(value) -> object:
-    if hasattr(value, "item"):
-        value = value.item()
-    # polars 日期值经 .item() 得 datetime.date/datetime——JSON 不认，转 ISO（M4/Q1 修复）
-    if isinstance(value, (_date, _datetime)):
-        return value.isoformat()
-    return value
+from pybridge.common import jsonify as _jsonify  # noqa: F401（改名导出，调用点零改动）
 
 
 def profile_column(series: pl.Series) -> dict:

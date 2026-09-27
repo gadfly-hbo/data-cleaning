@@ -1,43 +1,46 @@
-# M4 提案 — 生产化补课：xlsx 完整支持 + 血缘审计 + LLM 清洗建议（讨论稿固定）
+# M5 提案 — 数据源接入 + 聚类去重 + 容器化（讨论稿固定）
 
-> 来源：M3 flow DONE 后（commit fd3f8bb），用户启动 `/dev-flow 开始 M4`。
-> 规格上位源：docs/design.md v2（M4 行：多源接入、血缘审计视图、dedupe 实体匹配、LLM 清洗建议 | 生产化）。
-> M3 移交清单（.flow/tasks.md 存档，git fd3f8bb）：xlsx 引擎支持（importing-controller）、执行器 SIGKILL 孤儿、export-rows 罕见边界、createProject 抛错孤儿（已接受）、双实例端口探测、dagster-daemon 评估。
+> 来源：M4 flow DONE 后（commit 11b3cb9），用户启动 `/dev-flow 开始 M5`。
+> 规格上位源：docs/design.md v2（M4 行原文：多源接入（SeaTunnel/DataX）、dedupe 实体匹配、多用户/RBAC（M5+）；M4 proposal 明示"多源 → M5、dedupe → M5、多用户/RBAC/Docker → M5+"）。
+> M4 轮 3 移交项（.flow/review-findings.md）：冷启动重叠窗口、pkill -15 优先、畸形 URL 降级测试、_jsonify 合并、TERM 落盘实验。
 
-## 范围裁剪（本提案的第一决策，需用户在 diff 门确认）
+## 范围裁剪（本提案第一决策，需用户在 diff 门确认）
 
-design.md 的 M4 是方向篮子，一轮 flow 不可能全量交付且保住质量门槛。**本 flow 裁剪为三件事 + 一组生产化补课**，依据「既有承诺优先于新功能、单机产品价值优先于重集成」：
+延续 M4 裁剪模式（承诺债优先、单机价值优先、一轮可交付）：
 
 **纳入（本 flow）**：
-1. **xlsx 完整支持**（M1 承诺的诚实债，M3 轮 3 暴露）：推荐方案 = **pybridge 侧 xlsx→csv 转换后进引擎**（原始 xlsx 保留为 raw 版本字节，csv 为引擎工作形态；零新契约、类型经 polars 规范化）——而非探测 importing-controller 两阶段协议（新契约面大、引擎实现复杂度未知，作为备选）。
-2. **血缘审计视图**（design.md M4 原生项，数据已齐）：数据集→管道→运行→版本的溯源链已在 DB，补聚合端点 + 前端视图。
-3. **LLM 清洗建议**（差异化）：对选中列发送**列名 + top 值样本 + 画像摘要**（不含全量数据）到用户自配的 OpenAI 兼容端点，返回建议的清洗操作（GREL/mass-edit JSON），用户确认后经现有 apply 端点应用——**默认关闭、边界常驻声明**（DESIGN.md 语义：数据是否离开本机必须可见）。
-4. **生产化补课**：执行器 SIGKILL 孤儿回收（启动时清扫孤儿临时项目）；dagster-daemon 常驻评估结论记录（预期：单机形态维持方案 B，记录决策依据）；export-rows 罕见边界防御。
+1. **DB 数据源接入（轻量直连路线）**：pybridge 新增 sqlalchemy 直连 SQLite/PostgreSQL/MySQL——"整表或自定义 SQL → CSV → 注册数据集"（复用现有上传链路：raw 版本 = 导出 CSV 快照）。**不引入 SeaTunnel/DataX**：二者为 JVM 集群级引擎，与"单用户本地、按需起停"形态冲突（偏差记录，见下）。
+2. **聚类去重（dedupe）**：OpenRefine `compute-clusters` 契约实测（M0 列为"已确认存在未实测"）+ 工作台新增「聚类合并」操作类型：选定列 → 聚类预览（相似值分组）→ 勾选组合并 → 生成 mass-edit 操作（进历史，可回滚，与现有机制同构）。
+3. **容器化**：单 Dockerfile 多阶段构建（Node 运行时 + workspace 内引擎/JRE 复制或首启下载）+ compose 样例 + README 部署节；`data` 卷持久化。
+4. **M4 轮 3 五条低优先项清偿**（全部小项）。
 
 **推迟（不在本 flow，记录去向）**：
-- **多源接入（SeaTunnel/DataX）→ M5**：重集成（独立进程、连接器矩阵、调度对齐），与单机文件场景的主线价值距离最远。
-- **dedupe 实体匹配 → M5**（或按用户优先级提前）：compute-clusters 契约探测 + 聚类 UI 是独立特性线。
-- 多用户/RBAC/Docker 分发 → M5+（生产化深水区）。
+- **SeaTunnel/DataX 重集成 → 云端/多用户形态再评估**（单机直连已覆盖核心场景：拉表/查询入平台；SeaTunnel 的增量同步/百连接器矩阵在单机单用户下收益不抵运维成本——这是对 design.md v2 "接入层可选 DataX/SeaTunnel"的具体化，非选型推翻）。
+- **多用户/RBAC/鉴权 → M6**（涉及会话/权限模型设计，独立特性线）。
+- LLM 对话式/增量管道调度等（维持既有 Out of Scope）。
 
-## 背景与既定决策（M4 不可重议，继承 design.md v2 / M0-M3）
+## 背景与既定决策（M5 不可重议，继承 design.md v2 / M0-M4）
 
 - 产品模式不变：TS 壳 + adapter 隔离 + pybridge；DESIGN.md UI 规范；许可证/依赖锁/workspace 纪律。
-- 数据不可变/版本 append-only/Recipe ≡ 操作历史——全部沿用既有实现。
-- LLM 建议不改变"数据不出本机"的默认承诺：功能默认关闭、明确配置才启用、发送内容最小化且界面常驻声明。
+- DB 接入产物进既有数据模型（Dataset/Version/画像/规则/清洗/管道全链路复用）。
+- dedupe 走引擎既有操作机制（mass-edit），不引入新的状态形态。
+- 单用户本地形态；LLM 建议维持 M4 语义。
 
-## M4 目标（本 flow 范围）
+## M5 目标（本 flow 范围）
 
-设计验收（自拟，diff 门确认）：**xlsx 数据集获得与 CSV 等价的完整功能；血缘链路可视化可追溯；LLM 建议可用（配置端点后）且回归可测（stub）；生产化补课项闭环。** 组件：
+设计验收（自拟，diff 门确认）：**用户能从 SQLite/PG/MySQL 拉数据入平台走全链路；能在工作台用聚类合并清理相似值；能一条 docker 命令起完整服务。** 组件：
 
-1. pybridge：xlsx→csv 转换任务（引擎工作形态）；转换语义记录（类型规范化口径）。
-2. studio-api：上传分流改造（xlsx 转换后注册引擎项目；raw 版本仍存 xlsx 原件）；血缘聚合端点；LLM 建议端点（透传用户配置端点，超时/失败结构化）；启动孤儿项目清扫。
-3. studio-web：血缘视图（数据集详情或独立页）；LLM 建议面板（预览建议操作→一键应用，边界声明常驻）；xlsx 数据集功能等价后的 UI 无特判残留清理。
-4. 决策记录：dagster-daemon 维持方案 B 的结论。
+1. pybridge：`db_fetch` 任务（连接串/表名或 SQL → CSV 落盘 + 行列元数据）；sqlalchemy+驱动依赖入 lock（许可证核查）。
+2. studio-api：`POST /api/sources/db`（连接参数 → 测试连接 → fetch → 注册数据集）；连接信息不落盘（一次性行为，PRD 决）。
+3. adapters/openrefine：`computeClusters` 契约方法（M0 未实测端点）+ 契约测试。
+4. studio-web：工作台「聚类合并」面板（选列 → 聚类组预览 → 勾选合并 → 应用）；侧栏「数据源」入口（DB 接入表单）。
+5. 容器化：Dockerfile + compose + README。
+6. M4 轮 3 五项清偿。
 
 ## 开放问题（proposal 未定，留给 PRD/GRILL）
 
-- xlsx→csv 转换的类型口径（日期/数字格式化、空值）与列名冲突处理。
-- 血缘视图的信息架构（数据集详情内嵌 vs 独立「血缘」页）。
-- LLM 建议的交互形态（列级建议列表 vs 对话式；建议的置信呈现）。
-- LLM 端点配置方式（env vs 设置页）与模型约定（OpenAI 兼容 chat completions）。
-- 孤儿清扫的判定（引擎项目无对应 dataset 行即扫？时间阈值？）。
+- DB 驱动矩阵（sqlite3 内置/psycopg/mysql 驱动的版本与许可证）。
+- 连接信息安全（是否支持保存数据源、密码掩码；M5 最小=不保存）。
+- 聚类参数（算法选择 knn/blocking、距离函数）与 UI 呈现粒度。
+- compute-clusters 的轮询/性能形态（同步 or pending）。
+- 容器内引擎获取（构建期下载 vs 首启下载）与镜像体积取舍。

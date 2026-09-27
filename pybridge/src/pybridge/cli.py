@@ -6,12 +6,14 @@
 - pipeline：管道执行（M3，dagster 进程内物化；业务失败 status:fail + exit 0，J4）
 - rows：文件分页读（M3 版本预览，J5）
 - xlsx_to_csv：xlsx 引擎工作形态转换（M4/Q0，K1 口径）
+- db_fetch：DB 直连拉取整表/SQL → CSV（M5/S1）
 """
 
 import json
 import sys
 
 from pybridge.convert import xlsx_to_csv
+from pybridge.dbfetch import db_fetch
 from pybridge.loader import load_frame
 from pybridge.pipeline import run_pipeline, rows_page
 from pybridge.profile import profile
@@ -30,6 +32,8 @@ def main() -> None:
             result = run_pipeline(task)
         elif kind == "rows":
             result = rows_page(task["file"], int(task.get("offset", 0)), int(task.get("limit", 50)))
+        elif kind == "db_fetch":
+            result = db_fetch(task)
         elif kind == "xlsx_to_csv":
             result = xlsx_to_csv(task["src"], task["dst"])
         else:

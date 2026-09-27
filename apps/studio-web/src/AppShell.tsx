@@ -31,6 +31,17 @@ export function AppShell() {
               <div className="px-2 py-3 text-[11.5px] text-text-3">暂无数据集，先上传一个文件</div>
             )}
             <Link
+              to="/sources"
+              className={`block px-2.5 py-1.5 rounded-sm mb-0.5 ${
+                location.pathname.startsWith("/sources")
+                  ? "bg-accent-soft text-accent-strong"
+                  : "text-text-2 hover:bg-surface"
+              }`}
+            >
+              <div className="truncate font-medium">数据源</div>
+              <div className="text-[10.5px] text-text-3">SQLite · PG · MySQL</div>
+            </Link>
+            <Link
               to="/pipelines"
               className={`block px-2.5 py-1.5 rounded-sm mb-0.5 ${
                 location.pathname.startsWith("/pipelines")

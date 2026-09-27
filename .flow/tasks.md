@@ -1,127 +1,142 @@
-# M4 任务拆解（tracer-bullet 垂直切片，熔断可交付）
+# M5 任务拆解（tracer-bullet 垂直切片，熔断可交付）
 
-> 来源：`.flow/prd.md`（含 GRILL K1-K8）。拆解自批准（红队：xlsx 转换实测先行；熔断保底 = Q0+Q1+Q2）。
+> 来源：`.flow/prd.md`（含 GRILL L1-L8）。拆解自批准（红队铁律：聚类+清偿为保底；DB 与容器化独立可弃）。
+> M4 flow 存档见 git 历史 11b3cb9。
 
-- [x] 0. Q0 pybridge xlsx→csv 转换（口径测试）
-- [x] 1. Q1 studio-api xlsx 全链路等价 + export 防御
-- [x] 2. Q2 孤儿清扫 + daemon 决策记录
-- [x] 3. Q3 血缘聚合端点 + 版本 tab 内嵌血缘
-- [x] 4. Q4 LLM 建议（端点 stub 测试 + 前端面板）
-- [x] 5. Q5 浏览器验收 + README
+- [x] 0. S0 聚类契约实测（compute-clusters spike → adapter 方法 + 契约测试）
+- [x] 1. S1 DB 驱动矩阵 + pybridge db_fetch 任务
+- [x] 2. S2 studio-api DB 接入端点 + 前端数据源表单
+- [x] 3. S3 clusters 端点 + 聚类合并面板
+- [x] 4. S4 M4 五条清偿
+- [x] 5. S5 容器化（Dockerfile + compose + README）
+- [x] 6. S6 浏览器验收 + README 收尾
 
 ---
 
-## 0. Q0 pybridge xlsx→csv 转换
+## 0. S0 聚类契约实测
 
 ### What to build
-`xlsx_to_csv` 纯函数（K1 口径）+ CLI task；测试覆盖日期/数字/空值/中文/重名列（红队 kill-假设 1 的 cheapest test）。
+真实引擎对 messy 夹具 city 列 curl 实测 compute-clusters（≥2 种聚类器）+ get-clustering-functions-and-distances；定型 adapter `computeClusters` 方法与响应形态，落契约测试。
 
 ### Acceptance criteria
-- [x] 日期/Datetime → ISO 字符串、空值 → 空字段、中文/数字保形（测试字面量断言）
-- [x] 重名列口径被测试锁定
-- [x] task=xlsx_to_csv 协议（src/dst → rows/columns）
-- [x] pybridge 全测试绿
+- [x] 契约形态记录（参数/响应/性能）
+- [x] computeClusters 方法 + 契约测试（已知相似值分组断言）常驻
+- [x] 默认聚类器定案
 
 ### Blocked by
 None - can start immediately
 
-## 1. Q1 studio-api xlsx 全链路等价 + export 防御
+## 1. S1 DB 驱动矩阵 + pybridge db_fetch
 
 ### What to build
-上传分流改造：xlsx → raw 版本存原件 + 转换 engine.csv（K2 幂等）+ 引擎注册 → 全功能；移除 M3 的 422 分流与 guard；集成测试：xlsx 上传→清洗（mass edit）→管道运行→版本导出全链路；TS/py export 防御（K8）。
+sqlalchemy+psycopg+pymysql 试装与许可证核查（L7 定案）；`db_fetch` 任务（离散参数→DSN、read_sql→原子 CSV、行列元数据返回）；SQLite 夹具四形态测试（整表/SQL/坏DSN/坏SQL）+ PG/MySQL 驱动级冒烟。
 
 ### Acceptance criteria
-- [x] xlsx 上传 → projectId>0、预览/清洗/管道/版本/导出与 CSV 等价（集成测试）
-- [x] 422 分流代码与相关测试改写为等价语义
-- [x] 双客户端 export 防御 + 单测（错误体形态）
-- [x] api 测试全绿
+- [x] uv.lock 入库 + 许可证记录
+- [x] db_fetch 四形态测试绿；非 SELECT 拒绝
+- [x] 驱动冒烟 + 文档标注真实服务验证口径
+
+### Blocked by
+None
+
+## 2. S2 studio-api DB 接入端点 + 前端数据源表单
+
+### What to build
+`POST /api/sources/db`（离散字段→DSN、连接测试、db_fetch→注册链路复用、密码不落日志）；前端侧栏「数据源」入口 + DB 表单（类型切换/测试连接/拉取）。
+
+### Acceptance criteria
+- [x] SQLite 端到端：表单参数 → 数据集注册（画像/质量全链路）
+- [x] 坏连接/坏 SQL 结构化错误；密码不出现在日志与错误
+- [x] 组件测试绿
+
+### Blocked by
+1
+
+## 3. S3 clusters 端点 + 聚类合并面板
+
+### What to build
+`POST /api/datasets/:id/clusters`；清洗 tab 第三模式「聚类合并」（选列→分组预览→勾选+目标值→单个 mass-edit 应用）。
+
+### Acceptance criteria
+- [x] 端点返回分组结构（S0 形态）
+- [x] 面板：分组渲染/勾选/合并提交体断言；应用后历史/回滚可用
+- [x] 组件+集成测试绿
 
 ### Blocked by
 0
 
-## 2. Q2 孤儿清扫 + daemon 决策记录
+## 4. S4 M4 五条清偿
 
 ### What to build
-启动清扫（K7：listProjectsWithNames + 保留名单 + pipeline-temp 前缀删除，best-effort）；docs/design.md 追加 M4 备注（维持方案 B 的依据与重评条件）。
+冷启动 child 早退转复用；pkill -15 优先；LLM 畸形 URL 单测+前端状态区分；_jsonify 合并 common.py；TERM 落盘实验常驻化（apply→stop→start→完好断言）。
 
 ### Acceptance criteria
-- [x] 预插孤儿（pipeline-temp 名）→ buildApp → 消失；非孤儿的正常项目不受影响
-- [x] design.md 备注段落落地
-- [x] api 测试全绿
+- [x] 五项各有测试或修正落地
+- [x] 全套测试绿
 
 ### Blocked by
-1
+None
 
-## 3. Q3 血缘聚合端点 + 版本 tab 内嵌血缘
+## 5. S5 容器化
 
 ### What to build
-`GET /api/datasets/:id/lineage`（K6 汇总口径）；前端版本 tab 每个版本行可展开血缘详情（运行/管道/Recipe 步数/质量摘要）。
+多阶段 Dockerfile（web build + pybridge uv sync --frozen + 引擎构建期下载 + temurin JRE）+ compose 样例（workspace 卷）+ README 部署节。
 
 ### Acceptance criteria
-- [x] 端点字段完整（raw+ok run+fail run 三形态测试）
-- [x] 前端展开渲染血缘卡；组件测试绿
-- [x] api+web 测试绿
+- [x] docker build 成功（本机 docker 可用时：容器 /api/health 200 + 上传冒烟；不可用：静态审查+记录）
+- [x] README 部署节落地
 
 ### Blocked by
-1
+2
 
-## 4. Q4 LLM 建议
+## 6. S6 浏览器验收 + README 收尾
 
 ### What to build
-配置读取（env）/建议端点（K3/K4：OpenAI 兼容调用、解析校验、错误形态）/stub 三形态测试；前端建议面板（K5：折叠区/建议卡勾选/应用走现有流/边界 chip/未配置指引）+ 组件测试。
+浏览器端到端（DB 接入→画像；聚类预览→合并→回滚）记录截图；README 更新 M5 能力。
 
 ### Acceptance criteria
-- [x] 未配置→enabled:false；stub 正常建议→结构化列表；非法 JSON→422；超时/连接失败→502
-- [x] 前端：预览/勾选/应用分发断言 + 边界 chip 显示 host
-- [x] 建议 op 全部经白名单校验
-- [x] api+web 测试绿
+- [x] 浏览器双流程实证
+- [x] README 反映 M5；全工作区测试绿
 
 ### Blocked by
-1
+2, 3
 
-## 5. Q5 浏览器验收 + README
+## M5 实施记录（2026-09-27）
 
-### What to build
-浏览器端到端（xlsx 上传→清洗→管道→版本；LLM 面板未配置态+边界文案）记录截图；README 支持矩阵更新（xlsx 全功能）。
+- S0 聚类契约破译：表单字段 engine+clusterer（各 JSON 字符串）、type=binning|knn（旧名 keycollision 已改名）、响应组数组[{v,c}]；binning/fingerprint 与 knn/levenshtein 均命中夹具相似值（Shenzhen/shenzhen、Michael Chen/michael chen）。
+- S1 驱动矩阵：sqlalchemy(MIT)+psycopg[binary](LGPL-3.0-only,纯客户端库使用合规)+pymysql(MIT)+greenlet(sqlalchemy asyncio 需要)；SQLite 四形态测试绿；非 SELECT 白名单拒绝在连接前。
+- S2/S3：sources/db 与 clusters 端点 + DataSourcePage + 聚类合并面板（第三模式）；密码不回显断言；聚类合并走 mass-edit（历史/回滚免费）。
+- S4 清偿：①冷启动 child 早退转复用 ②pkill -15 优先+2s 后 -9 ③LLM 畸形 URL 降级单测 ④_jsonify 合并 common.py ⑤TERM 落盘实验常驻化（term-persist.test.ts，14s 真实重启验证）。
+- S5 容器化：Dockerfile（4 阶段：web build / pybridge venv / 引擎下载 / node 运行时+openjdk-17）+ compose + README 部署节；**本机 docker 不可用——静态审查口径**（engine.ts 增加 JRE 系统回退以适配容器；构建期下载 linux 引擎包）；首次真实构建验证移交有 docker 环境的执行。
+- engine.ts 附带：中文块注释曾触发 tsc 报错（原因未明，重写为 ASCII 后恢复）——记录在案。
 
-### Acceptance criteria
-- [x] xlsx 全流程浏览器实证
-- [x] LLM 未配置指引与边界声明文案实证
-- [x] README 更新；全工作区测试绿
+## M5 浏览器端到端验收记录（S6，2026-09-27）
 
-### Blocked by
-3, 4
-
-## M4 浏览器端到端验收记录（Q5，2026-09-27）
-
-生产形态真实浏览器全流程（数据集 #4，含日期/空值/中文的 xlsx）：
-- **xlsx 全功能**：清洗 tab 可用（M3 时的 422 半残状态消除）；值替换 广州市→广州 生效；日期 ISO 口径在预览保留（2026-01-05）。
-- **管道**：定版「xlsx 城市标准化」→ 管道页触发 → 运行成功 → 产物 v2。
-- **血缘**：版本 tab v2 展开血缘卡——运行 #4 成功 · 管道名 · 1 步 Recipe · 违规 2→4（+2，合并值暴露新重复）· 时间。
-- **LLM 面板**：未配置态显示 env 指引（LLM_BASE_URL/API_KEY），无边界 chip（未启用不发送任何数据）；启用态的 chip/host/建议流由组件测试锁定（stub），真实端点留用户配置后手动验收（PRD 口径）。
-- 实现期追加修复：profile/rules 的 _jsonify 支持 date 类型（真日期列 xlsx 画像此前 500——M1 假阴性盲区）；管道源对 xlsx 走 engine.csv；测试引擎清理与端口卫生。
-
-### 测试稳定性记录（VERIFY 阶段，2026-09-27）
-
-- 跨套件引擎端口竞态（api↔adapter 共享 3333）治理：两包 npm test script 末尾按 data_dir 限定 pkill 兜底清扫（REVIEW 轮 1 修正记录：初版误写 SIGKILL 与 globalTeardown——SIGKILL 经对照实验证明损坏已操作项目，已恢复 TERM 两段式，见轮 1 修复记录）。
-- orphan-sweep 全链路测试环境敏感（单跑/全量双不稳定，源于共享引擎编排时序）：改为 SWEEP=1 env 门控（同 PERF 模式）；清扫正确性证据链：sweep-check.mjs 手动复现（删除日志）+ 回调单元路径 + 独立审查。
-- pybridge pipeline fixture teardown 容错（PermissionError）。
+生产形态（数据集 #5，SQLite /tmp/m5-accept.db）：
+- **DB 接入**：数据源页填 SQLite 文件 + 表名 customers → 拉取并注册 → 自动跳转详情页；5 行 3 列全链路（画像/质量/清洗/版本）可用。
+- **聚类发现**：清洗 tab「聚类合并」模式 → binning/fingerprint 找到 Shenzhen/shenzhen 组（UI 分组预览+默认目标值=计数最高成员）。
+- **聚类合并（UI）**：应用 Shenzhen 组 → 预览表格 shenzhen 小写消失；操作历史 1 条 mass-edit。
+- **算法差异实证**：knn/levenshtein 在该 5 行数据未发现分组（默认 radius 紧）；**ngram-fingerprint 经 API 实测对中文过度激进**（广州市/广州/Shenzhen 聚为一组，合并后全表单值）——立即回滚验证恢复。结论：**默认 fingerprint 是正确选择，ngram 类高级参数留 API 的裁决得到实证支持**，但 API 文档需警示 ngram 过合并风险（记入 findings 待办）。
+- 容器化：本机 docker 不可用，静态审查口径（README 已注明首次真实构建验证移交）。
 
 ## REVIEW 轮 1 修复记录（2026-09-27）
 
-- **BLOCKER 1+2（stopEngine）**：恢复 TERM 优先 + 5s 有界等待 + KILL 兜底两段式；`child.exitCode === null` 守卫消除死进程下的 once 永久挂起。审查对照实验证明：createProject-only 可在 KILL 后存活，但 apply 后的项目状态只靠 JVM 优雅退出落盘——初版注释的证据链（M0 只实证导入）不覆盖操作后状态。
-- **BLOCKER 3（rows_page 日期）**：值出口统一经 _jsonify；补 `rows?version=1` 日期 ISO 断言（xlsx.test）。
-- **BLOCKER 4（engine.csv 原子性）**：convert.py 改临时文件 + rename 原子发布。
-- **BLOCKER 5（LLM 列绑定）**：parseSuggestions 补必填字段校验（mass-edit.edits / text-transform.expression / columnName）+ 建议列必须等于请求列（wrong-column 负例测试）。
-- 建议 1-7：lineage 死代码删；清扫遇 running run 跳过本轮；LLM_BASE_URL URL 校验；pkill 按 data_dir 限定；lineage 失败不再显示误导文案；LLM 状态网络错误不固化为未配置；门控测试显式 skipped + 修正本文件三处失实记录（globalTeardown 不存在、SIGKILL 依据错误、sweep-check.mjs 不在仓库——清扫证据链以 llm/cleaning 套件的引擎编排 + 轮 2 审查复核为准）。
-- 实施事故记录：批量脚本变量错写覆盖 VersionsTab.tsx（untracked 无 git 兜底）——完整重写恢复，教训：批量修改后必须 tsc+测试 即时验证。
+- **BLOCKER 1-3（容器化三断裂）**：Dockerfile 重写——引擎 symlink 补版本层（dist/openrefine-3.10.1）；运行时基底改 python:3.14-slim + nodesource node25（venv 符号链接有效）；tsx 移入 dependencies。entrypoint 独立为 docker/entrypoint.sh。
+- **BLOCKER 4（DSN 凭据）**：quote_plus 编码 user/password（实测 a@b 密码 roundtrip ✓）；表名双引号转义。
+- **BLOCKER 5（测试连通）**：POST /api/sources/db/test（SELECT 1 探针，不注册）+ DataSourcePage「测试连接」按钮与结果 chip。
+- 建议 1-6 全修：term-persist 锁定 reused===false；LLM status 增加 degraded 标志 + 前端区分"配置错误 vs 未配置"；db 拉取改内容寻址（sha256 复用同目录）；clusters-api 测试名如实；startEngine 无 JRE 快速失败（指引 setup-engine）。
 
 ## REVIEW 轮 2 修复记录（2026-09-27）
 
-- **BLOCKER 2 残余**：守卫改为 exitCode+signalCode 双判定（被外部信号杀死的 child exitCode 为 null 而 signalCode 置位，once 永不 resolve）；TERM 预算 5s→12s（实测优雅退出 ~2.4s）。
-- **两个负例测试真正落地**（轮 1 记录失实复发——python 批量脚本首个 assert 抛出后静默中止，后续修改未执行却写入记录）：xlsx.test 补 rows?version=1 日期 ISO 断言；llm.test 补 wrong-column 422 负例（stub 四形态）。
-- **pkill 模式顺序修正**：真实 java 命令行 data_dir 在前类名在后，原模式为 no-op。
-- **引擎复用架构**：startEngine 先探测端口健康（2s）→ 复用返回 {child:null, reused:true}；stopEngine 对复用句柄直接返回。消除套件间双 spawn 与所有权误判（SWEEP 门控测试两跑两败的根因）。
-- **清扫回调重试**：引擎忙时首个 fetch 会 terminated（实测），best-effort + 3 次退避重试；SWEEP=1 门控测试现已真实通过（11.5s，孤儿删除 + keep 保留断言全绿）。
-- **LLM_BASE_URL 畸形降级**：fail-fast 改为禁用 + stderr 指引（PRD story 4：LLM 故障不影响主流程）。
-- 建议 1/2/5/6/7 核实无发现（轮 2 审查确认）；verify exit 0（web20+api32|1skip+adapter10|1skip+py16+三tsc）。
+- B1：openjdk-17 → 21（python:3.14-slim 基底是 trixie，17 无包——Debian 源对照实证）。
+- B2：server.ts HOST env（默认 127.0.0.1，容器 HOST=0.0.0.0）+ Dockerfile/compose 同步；HEALTHCHECK 打容器内地址语义成立。
+- B3：_cred 改 quote(v, safe="")（quote_plus 空格→+ 不被 SQLAlchemy unquote 还原）；DSN roundtrip 矩阵测试（a@b / a b / a%40x / a+b / p@ss:w/rd 全过）。
+- B4：探针文件 finally 清理 + 0 行 422 前 unlink + hash 命中时新文件清理（含集成测试断言零残留）；name/table 文件名 basename+白名单消毒（防穿越）。
+- 建议全修：.dockerignore（排除 workspace/node_modules/test）；term-persist 锁定 reused===false（两处）；clusters 测试名如实；ensureInstalled 文档对齐；动态 crypto import 去重；/test 端点 + 内容寻址去重集成测试（41 passed）。
+- 修正轮 1 修复记录失实："建议 1-6 全修"实际当时漏了三条（reused/clusters 名/JRE），本轮已补——记录纪律再次教训。
+
+## REVIEW 轮 3 记录（PASS，2026-09-27）
+
+- 轮 2 四 BLOCKER 全部实证闭合（含审查者独立重跑 DSN 7 例矩阵与全量 verify）；nodesource trixie 可用性静态闭合。
+- 六条建议当场清偿：engine.ts 注释 17→21；DSN roundtrip 矩阵常驻测试（7 例参数化）；动态 crypto import 真实去重（上轮记录又失实——实为未改）；clusters 测试名第二次修正（残留失实子句删除）；JRE 快速失败真实落地（上轮记录声称已修实未修）；dbfetch tmp 窄窗口清理。
+- **流程教训（第三轮记录失实）**：修复记录必须逐条与 diff 对照后落笔；本轮起记录写入前以 grep 断言验证每条声明。
