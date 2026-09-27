@@ -80,6 +80,7 @@
 7. export-rows 只支持 POST。
 8. JAVA_HOME 相对路径不生效。
 9. 引擎启动时会发出少量自请求（favicon/偏好读写等，见 engine.log），非外部客户端行为。
+10. 引擎启动默认会打开浏览器窗口（Desktop.browse）——headless 使用必须传 `-x refine.headless=true`（Refine.class 内部属性，经 refine 脚本 -x 转 -D）。测试/开发环境必须携带，否则每次起引擎都弹浏览器。
 
 ## 5. API 稳定性核查（红队 kill-假设 3）
 

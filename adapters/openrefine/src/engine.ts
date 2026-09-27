@@ -97,6 +97,7 @@ export async function startEngine(): Promise<EngineHandle> {
     "-p", String(ENGINE_PORT),
     "-i", "127.0.0.1",
     "-d", DATA_DIR,
+    "-x", "refine.headless=true", // 不弹浏览器（Refine.class 内部属性：启动后跳过 Desktop.browse）
   ], {
     env: {
       ...process.env,
