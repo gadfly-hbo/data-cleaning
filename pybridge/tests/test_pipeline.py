@@ -44,7 +44,8 @@ RECIPE = [
 @pytest.fixture(scope="module")
 def engine():
     proc = subprocess.Popen(
-        [str(REFINE), "-p", "3333", "-i", "127.0.0.1", "-d", str(WS / "engine-data")],
+        [str(REFINE), "-p", "3333", "-i", "127.0.0.1", "-d", str(WS / "engine-data"),
+         "-x", "refine.headless=true"],  # 不弹浏览器（与 adapter engine.ts 对齐）
         env={**os.environ, "JAVA_HOME": str(JAVA_HOME), "REFINE_MEMORY": "2048M"},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

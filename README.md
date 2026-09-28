@@ -29,14 +29,15 @@ npm run start
 docker compose up -d --build   # http://localhost:8787，workspace 卷持久化
 ```
 
-镜像包含 web 产物、pybridge、OpenRefine 引擎与系统 JRE。**注意**：本 Dockerfile 在无 docker 环境下仅经静态审查，首次真实构建请在有 docker 的机器执行并反馈问题（M5 记录）。DB 接入的 PostgreSQL/MySQL 真实服务验证同样留待有对应环境的机器（本机仅 SQLite 端到端 + 驱动冒烟）。
+镜像包含 web 产物、pybridge、OpenRefine 引擎与系统 JRE。**注意**：本 Dockerfile 在无 docker 环境下仅经静态审查，首次真实构建请在有 docker 的机器执行并反馈问题（M5 记录；M8 起 entrypoint 改为 exec 直达 node 并清理陈旧 `.engine-port`，经静态审查 + 本地等价命令实测，容器内首验随首次真实构建）。DB 接入的 PostgreSQL/MySQL 真实服务验证同样留待有对应环境的机器（本机仅 SQLite 端到端 + 驱动冒烟）。
 
 **M6 已交付**：多用户基础——认证（argon2id + 签名 cookie session）与数据隔离（数据集/管道归属 owner，admin 全见他人只读）。
 
 ### 多用户说明
 
 - 首次启动访问 `/setup` 创建管理员；登录后管理员经 `POST /api/users` 创建普通用户（封闭式，无自助注册）。
-- 每个用户只看到自己的数据集与管道；admin 审计可见全部但只能操作自己的对象。
+- 每个用户只看到自己的数据集与管道，并可在「审计」页查看自己的操作流水；admin 可见全平台流水但只能操作自己的对象。
+- 审计日志保留策略：最多 100,000 条，超出后自动裁剪最旧记录（append-only 仅约束写入路径，不代表永久留存）。
 - 边界声明：本产品为本地单机设计，认证隔离是应用层的——本机进程可直接访问数据引擎端口。网络级隔离（引擎 socket 化）与细粒度 RBAC 规划在后续版本。
 
 环境验证状态：docker 首次构建与 PostgreSQL/MySQL 真实服务全链路验证仍待有对应环境的机器执行（本机不可用）。

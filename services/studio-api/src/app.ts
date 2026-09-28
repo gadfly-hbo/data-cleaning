@@ -156,14 +156,28 @@ export async function buildApp(opts: AppOptions = {}) {
   const app = fastify({ logger: false });
   await app.register(multipart, { limits: { fileSize: MAX_UPLOAD_BYTES } });
 
-  // ===== 审计日志查询（M7/V3：admin 专用）=====
+  // ===== 审计日志查询（M7/V3 建；M8/V1 扩展：过滤 + total + 非 admin 自查收敛）=====
 
   app.get("/api/audit", async (req, reply) => {
-    if (actor(req).role !== "admin") return reply.code(403).send({ error: "admin only" });
-    const query = req.query as { limit?: string; offset?: string };
+    const u = actor(req);
+    const query = req.query as {
+      limit?: string; offset?: string;
+      action?: string; username?: string; resource_type?: string; resource_id?: string;
+    };
     const limit = Math.min(200, Math.max(1, Number(query.limit ?? 50) || 50));
     const offset = Math.max(0, Number(query.offset ?? 0) || 0);
-    return { audit: listAudit(db, limit, offset) };
+    const isAdmin = u.role === "admin";
+    const { entries, total } = listAudit(db, {
+      limit,
+      offset,
+      action: query.action || undefined,
+      // 非 admin 的 username 过滤请求被忽略——服务端以 user_id=self 收敛（GRILL O1/O4）
+      username: isAdmin ? query.username || undefined : undefined,
+      resourceType: query.resource_type || undefined,
+      resourceId: query.resource_id || undefined,
+      ...(isAdmin ? {} : { userId: u.id }),
+    });
+    return { audit: entries, total };
   });
 
   // ===== 用户管理（M6/U3：admin 专用）=====

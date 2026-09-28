@@ -70,8 +70,8 @@ test("key actions are recorded in audit_log with correct user and resource", asy
   expect(upload?.resource_id).toBe(String(ds.id));
 });
 
-test("admin-only query: editor gets 403", async () => {
-  // admin 给 viewer 建号（受限测试核心——403 语义由 role-matrix 覆盖，这里只需 audit 语义）
+test("V1 role convergence: viewer gets 200 with only own actions", async () => {
+  // M8/V1：非 admin 自查（PRD D1）——原 403 语义作废，服务端强制 user_id=self
   const create = await fetch(`${baseUrl}/api/users`, {
     method: "POST", headers: { "content-type": "application/json", cookie },
     body: JSON.stringify({ username: "view1", password: "view1-pass-12", role: "viewer" }),
@@ -82,8 +82,88 @@ test("admin-only query: editor gets 403", async () => {
     body: JSON.stringify({ username: "view1", password: "view1-pass-12" }),
   });
   const vCookie = (login.headers.get("set-cookie") ?? "").split(";")[0]!;
+
   const res = await fetch(`${baseUrl}/api/audit`, { headers: { cookie: vCookie } });
-  expect(res.status).toBe(403);
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as {
+    audit: Array<{ username: string; action: string }>;
+    total: number;
+  };
+  expect(Array.isArray(body.audit)).toBe(true);
+  expect(typeof body.total).toBe("number");
+  // viewer 刚 login——自查流水只有自己；admin 的 dataset_upload 绝不可见
+  expect(body.audit.length).toBeGreaterThan(0);
+  expect(body.audit.every((a) => a.username === "view1")).toBe(true);
+  expect(body.audit.map((a) => a.action)).not.toContain("dataset_upload");
+
+  // username 过滤对非 admin 不生效（服务端以 self 为准）
+  const spoof = (await (await fetch(`${baseUrl}/api/audit?username=admin`, { headers: { cookie: vCookie } })).json()) as {
+    audit: Array<{ username: string }>;
+  };
+  expect(spoof.audit.every((a) => a.username === "view1")).toBe(true);
+});
+
+test("V1 admin filters: action / username / resource / total", async () => {
+  // 自建被过滤用户（REVIEW：测试须可独立重跑，不依赖前序测试的 view1）
+  await fetch(`${baseUrl}/api/users`, {
+    method: "POST", headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ username: "filt1", password: "filt1-pass-1", role: "editor" }),
+  });
+  await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username: "filt1", password: "filt1-pass-1" }),
+  });
+
+  const form = new FormData();
+  form.append("file", new File([readFileSync(FIXTURE)], "filter.csv", { type: "text/csv" }));
+  const up = await fetch(`${baseUrl}/api/datasets`, { method: "POST", body: form, headers: { cookie } });
+  const ds = (await up.json()) as { id: number };
+
+  const byAction = (await (await fetch(`${baseUrl}/api/audit?action=dataset_upload&limit=200`, { headers: { cookie } })).json()) as {
+    audit: Array<{ action: string; resource_id: string }>;
+    total: number;
+  };
+  expect(byAction.audit.length).toBeGreaterThan(0);
+  expect(byAction.audit.every((a) => a.action === "dataset_upload")).toBe(true);
+  expect(byAction.total).toBeGreaterThanOrEqual(byAction.audit.length);
+
+  const miss = (await (await fetch(`${baseUrl}/api/audit?action=no-such-action`, { headers: { cookie } })).json()) as {
+    audit: unknown[];
+    total: number;
+  };
+  expect(miss.audit).toEqual([]);
+  expect(miss.total).toBe(0);
+
+  const byUser = (await (await fetch(`${baseUrl}/api/audit?username=filt1`, { headers: { cookie } })).json()) as {
+    audit: Array<{ username: string }>;
+  };
+  expect(byUser.audit.length).toBeGreaterThan(0);
+  expect(byUser.audit.every((a) => a.username === "filt1")).toBe(true);
+
+  const byRes = (await (await fetch(
+    `${baseUrl}/api/audit?resource_type=dataset&resource_id=${ds.id}`, { headers: { cookie } },
+  )).json()) as { audit: Array<{ action: string; resource_id: string }>; total: number };
+  expect(byRes.audit.length).toBeGreaterThan(0);
+  expect(byRes.audit.every((a) => a.resource_id === String(ds.id))).toBe(true);
+  expect(byRes.audit.some((a) => a.action === "dataset_upload")).toBe(true);
+});
+
+test("V1 unauthenticated gets 401 (tasks V1 清单项)", async () => {
+  const res = await fetch(`${baseUrl}/api/audit`);
+  expect(res.status).toBe(401);
+});
+
+test("V1 pagination shape: limit/offset windows into total", async () => {
+  const p0 = (await (await fetch(`${baseUrl}/api/audit?limit=1&offset=0`, { headers: { cookie } })).json()) as {
+    audit: Array<{ id: number }>;
+    total: number;
+  };
+  const p1 = (await (await fetch(`${baseUrl}/api/audit?limit=1&offset=1`, { headers: { cookie } })).json()) as {
+    audit: Array<{ id: number }>;
+  };
+  expect(p0.audit).toHaveLength(1);
+  expect(p0.total).toBeGreaterThan(1);
+  expect(p0.audit[0]!.id).not.toBe(p1.audit[0]!.id);
 });
 
 test("lineage endpoint includes recent_audit events", async () => {

@@ -59,6 +59,17 @@ export function AppShell() {
               <div className="truncate font-medium">管道</div>
               <div className="text-[10.5px] text-text-3">定版 · 调度 · 对比</div>
             </Link>
+            <Link
+              to="/audit"
+              className={`block px-2.5 py-1.5 rounded-sm mb-0.5 ${
+                location.pathname.startsWith("/audit")
+                  ? "bg-accent-soft text-accent-strong"
+                  : "text-text-2 hover:bg-surface"
+              }`}
+            >
+              <div className="truncate font-medium">审计</div>
+              <div className="text-[10.5px] text-text-3">操作流水</div>
+            </Link>
             {datasets.map((d) => (
               <Link
                 key={d.id}

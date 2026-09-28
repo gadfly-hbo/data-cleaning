@@ -1,127 +1,58 @@
-# M7 任务拆解（tracer-bullet 垂直切片，熔断可交付）
+# M8 任务拆解（tracer-bullet 垂直切片）
 
-> 来源：`.flow/prd.md`（含 GRILL O1-O9）。拆解自批准（红队：RBAC+M6 债为保底；端口隔离与审计独立可弃）。
+> 来源：`.flow/prd.md`（含 GRILL O1-O10 决议）+ `.flow/proposal.md`。拆解自批准。
+> 插曲修复（未提交，随本 flow SHIP 入库）：pybridge/tests/test_pipeline.py fixture 补 `-x refine.headless=true`。
 
-- [x] 0. V0 端口随机化 spike（-p 0 可行性实测）
-- [x] 1. V1 引擎端口去常量化 + .engine-port 文件 + 复用探测改造
-- [x] 2. V2 角色扩展 + 权限矩阵守卫替换 + 角色矩阵测试
-- [x] 3. V3 审计日志表 + 写入钩子 + admin 查询端点
-- [x] 4. V4 前端（角色 chip/viewer 条件渲染/血缘审计嵌入）
-- [x] 5. V5 M6 五条债清偿
-- [x] 6. V6 浏览器验收（三角色）
+- [x] 1. V1 审计查询 API 扩展（过滤 + total + 角色收敛）
+- [x] 2. V2 审计保留策略（pruneAudit + insertAudit 内联裁剪）
+- [x] 3. V3 容器引擎生命周期修复（entrypoint exec 直达 node + 清理陈旧 .engine-port）
+- [x] 4. V4 role-matrix O3 正例（admin 触发他人 pipeline）
+- [x] 5. V5 审计中心页（路由 + 导航 + 页面 + README 披露）
 
----
+## 1. V1 审计查询 API 扩展
 
-## 0. V0 端口随机化 spike
+端到端行为：`GET /api/audit` 支持 `action/username/resource_type/resource_id` 精确过滤（参数化），响应含 `total`（同条件 COUNT）；非 admin 强制 `user_id=self`（viewer/editor 200 自查，不再 403）；admin 全量。时间倒序、limit≤200 不变。
 
-### What to build
-curl 实测 `-p 0`：引擎是否接受、实际端口从哪读（engine.log 的 "Starting Server bound to" 行）；不可行则测 30000-60000 随机。
+- db.ts：`listAudit(db, {limit, offset, action?, username?, resourceType?, resourceId?, userId?})` 返回 `{ entries, total }`；WHERE 子句按可选参数拼接 + 参数绑定（禁字符串拼接值）。
+- app.ts：/api/audit 读 query 参数；非 admin 注入 actor.id 为 userId，忽略 username 参数。
+- 测试（audit.test.ts 扩展）：过滤命中/不命中矩阵；viewer/editor 仅见自己（制造他人记录）；admin 见他人；total 正确；401 未认证。
+- Blocked by：无。User stories：1/2/3/4/5。
 
-### Acceptance criteria
-- [x] 可行性结论记录 + 实现路径定案
+## 2. V2 审计保留策略
 
-### Blocked by
-None
+端到端行为：audit_log 超 100,000 条时自动裁剪最旧，写入路径不变（无 UPDATE），stderr 可见裁剪日志。
 
-## 1. V1 端口去常量化 + .engine-port 文件
+- db.ts：`pruneAudit(db, cap)`（`DELETE FROM audit_log WHERE id <= (SELECT MAX(id) FROM audit_log) - ?`——id 单调区间删除；等价性依赖全仓无中段删除，REVIEW 轮 1 回写确认）；`insertAudit` 写入后内联调用（cap 为模块常量 100_000）；console.log 一行；裁剪失败独立记 `[audit] prune failed`。
+- 测试：探针 SQLite 库插入小 cap（直接调 pruneAudit）断言最旧被裁、最新保留；insertAudit 后行数不超 cap。
+- Blocked by：无（与 V1 同文件不同函数，冲突面小）。User stories：6。
 
-### What to build
-adapter：ENGINE_PORT 去导出常量→EngineHandle.port 动态；startEngine 解析实际端口→写 `.engine-port`；复用探测读文件→fetch(该端口)；stopEngine 删文件。全部调用方（studio-api/pybridge pipeline）改用动态 port。
+## 3. V3 容器引擎生命周期修复
 
-### Acceptance criteria
-- [x] 两次启动端口不同（随机化实证）
-- [x] 复用路径正常（读文件→探测→复用）
-- [x] adapter + api 测试绿
+端到端行为：docker stop 时 SIGTERM 直达 node → app.close() → 引擎 TERM 优雅落盘（不再依赖 npm 转发）；容器每次启动清掉陈旧的 workspace/.engine-port。
 
-### Blocked by
-0
+- docker/entrypoint.sh：`rm -f workspace/.engine-port`；末行改 `exec /app/node_modules/.bin/tsx services/studio-api/src/server.ts`。
+- 验证：`sh -n` 语法检查 + 本地实测等价命令（`node node_modules/.bin/tsx services/studio-api/src/server.ts` 起服务响应 /api/health，随后优雅杀掉）——O7 已证 REPO_ROOT 由 import.meta.url 推导，cwd 无关。
+- Blocked by：无。User stories：9/10。
 
-## 2. V2 角色扩展 + 权限矩阵
+## 4. V4 role-matrix O3 正例
 
-### What to build
-users.role 扩展 admin|editor|viewer；visible/writable 守卫改为 `canRead(user, rec) / canWrite(user, rec) / isAdminOnly`；全部端点映射矩阵；角色矩阵集成测试（3 角色 × 端点类型矩阵）。
+端到端行为：admin 触发 editor 所属 pipeline → 202，run 归属链完整（run.pipeline_id 匹配、editor 在 runs 列表可见）。
 
-### Acceptance criteria
-- [x] viewer 全写端点 403/404 / editor 正常 / admin 管理
-- [x] 矩阵测试绿；M6 isolation.test 经参数适配仍绿
+- role-matrix.test.ts 新增一个 test：setupAuth 造 admin+editor；editor 建 pipeline（注入 runPybridge mock）；admin trigger → 202 + 断言；editor runs 可见。
+- Blocked by：无。User stories：8。
 
-### Blocked by
-None（可与 V1 并行）
+## 5. V5 审计中心页
 
-## 3. V3 审计日志
+端到端行为：侧栏「审计」入口 → /audit 页；admin 见过滤栏（action 下拉 11 类/username/resource_type/resource_id）+ 分页 + 流水表；非 admin 无 username 过滤、页头「仅显示我的操作」；detail 原样截断 ~100 字符 title 悬浮；action chip；脚注披露保留策略。
 
-### What to build
-audit_log 表 + 写入钩子（10 个 action，best-effort）+ GET /api/audit + lineage 附 recent_audit。
+- api.ts：`listAudit(params)` 客户端封装（带 total）。
+- main.tsx 路由 /audit + AppShell 导航入口（管道之后，全角色可见）。
+- pages/AuditPage.tsx：过滤栏 + 分页 + 表；me() 角色自适应。
+- README：审计保留策略一节（上限 10 万条，自动裁剪最旧）。
+- 测试（audit.test.tsx）：admin 渲染过滤栏与 total；非 admin 无 username 过滤且有「仅显示我的操作」；行渲染 chip + detail 截断。
+- Blocked by：V1。User stories：1-5/7。
 
-### Acceptance criteria
-- [x] 关键操作后行存在 + 用户/资源正确
-- [x] 审计失败不阻断业务；admin 查询可用
-- [x] lineage recent_audit 嵌入
+## 验收总线
 
-### Blocked by
-2
-
-## 4. V4 前端角色适配
-
-### What to build
-角色 chip 三级色；viewer 条件渲染（清洗 tab/上传/定版隐藏）；血缘审计嵌入展示。
-
-### Acceptance criteria
-- [x] 三角色 UI 各自正确；组件测试绿
-
-### Blocked by
-2, 3
-
-## 5. V5 M6 五条债
-
-### What to build
-suggest 分支测试/用户菜单测试/setup 先 hash/login 哑 verify/DDL owner_id。
-
-### Acceptance criteria
-- [x] 五条各有测试或修正落地
-
-### Blocked by
-None
-
-## 6. V6 浏览器验收
-
-### What to build
-三角色各登录一轮（viewer 只读/editor 操作/admin 管理+审计）记录。
-
-### Acceptance criteria
-- [x] 三角色浏览器实证 + 记录
-- [x] 全工作区测试绿
-
-### Blocked by
-4
-
-## V0-V1 实施记录（2026-09-27）
-
-- V0 spike：`-p 0` 可行——Jetty 分配 OS 随机端口（实测 55877/57264/58202），日志行 `Started ServerConnector@...{127.0.0.1:<port>}` 可解析。
-- V1：engine.ts spawn 传 `-p 0`；resolvePort 从日志 offset 后段解析（防历史行误匹配）；`.engine-port` 文件记录/复用探测读/停止删除；EngineHandle.port 全链路动态化（adapter client、api engineManager port getter、pybridge engine_url、全部测试改 engine.port）。
-- 兼容性：ENGINE_PORT 常量保留 deprecated 导出（studio-api/app.ts/engine-manager 已去除引用）。
-
-## V2-V5 实施记录（2026-09-27）
-
-- V2：角色矩阵 canRead/canWrite/canCreate/canTrigger 四守卫替换 M6 硬编码；POST /api/users 加 role 参数；role-matrix.test 4 用例锁定三角色边界。
-- V3：audit_log 表 + audit() helper + 7 处写入钩子（upload×2/operations/pipeline_create/trigger/login）+ GET /api/audit（admin）+ lineage 附 recent_audit；audit.test 3 用例。
-- V4：角色 chip 三级色 + DatasetPage viewer 隐藏清洗 tab（ALL_TABS+VIEWER_HIDDEN）+ lineage 类型扩展。
-- V5 五债全清：① suggest 已登录未配置 200+hint 测试 ② UserMenu.test（chip 三色+登出分发）③ setup 先 hash 后 count+insert ④ login 哑 argon2 恒时 verify ⑤ DDL 直接带 owner_id（测试适配：迁移/scheduler 去手工 ALTER）。
-- 全套 verify exit 0（web29+api58|1skip+adapter13|1skip+py28+三tsc）。
-
-## M7 浏览器端到端验收记录（V6，2026-09-27）
-
-生产形态三角色实证：
-- **viewer（viewr）**：中性 chip（bg-surface-2）、清洗 tab 隐藏、不见 admin 数据集（空态）；截图。
-- **editor（edith）**：chip-ok 色 chip「edith · editor」、五 tab 全（含清洗）、上传自己数据集、清洗面板可用、版本页血缘审计嵌入渲染（最近操作记录：时间+用户+action chip）；截图。
-- **admin**：审计 API 可查（edith dataset_upload / 各 login 事件按序呈现）。
-- 引擎端口随机化在验收全程生效（.engine-port 驱动，无 3333 依赖）。
-
-## REVIEW 轮 1 修复记录（2026-09-28）
-
-- B1（潜伏 bug）：resolvePort 改 Buffer.subarray(offset).toString()——字节偏移不再误用于 UTF-16 切片（中文日志累积后启动必失败的根源）。
-- B2（规格）：补 6 处审计钩子——user_create/user_disable/user_reset_password/logout（白名单端点自行验签记录）/history_restore/db_fetch；11 action 枚举全覆盖。
-- B3：删上传双写（439 行），保留行 detail 带真实 ext（修掉 CSV 显示 xlsx 的假数据）。
-- B4：datasets.test「engine recycled」改读 .engine-port（3333 断言恒真空转修复）；orphan-sweep client 用 engine.port。
-- 建议 1-3：insertAudit catch 加 stderr；.engine-port 0600；migrateLegacyRoles 幂等迁移存量 role=user。
-- 实施事故记录：批量脚本误覆盖 db.ts 为 app.ts 内容——git checkout 恢复后逐段重施（审计 helper/角色扩展/DDL owner_id），教训：写文件脚本必须 dry-run 校验头部特征再落盘。
+- verify gate 沿用 M7 全量命令；`.engine-port` 驱动复用探测不被破坏（orphan-sweep 测试仍绿）。
+- README 环境限制披露段补一句：entrypoint 修复为静态审查+本地等价实测，容器内首验随首次真实构建。

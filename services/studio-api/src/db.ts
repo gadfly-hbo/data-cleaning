@@ -483,6 +483,23 @@ export interface AuditEntry {
   detail: string | null;
 }
 
+/** M8/V2：audit_log 容量硬上限（PRD D2/GRILL O6）。append-only 只约束写入路径（无 UPDATE），最旧记录可被裁剪。 */
+export const AUDIT_MAX_ROWS = 100_000;
+
+/**
+ * 裁剪最旧记录至 cap 条。id 为 AUTOINCREMENT 单调行号，用 max_id 区间删除避免子查询排序；
+ * 与「保留最新 cap 条」语义等价的隐式不变量：全仓无任何中段删除 audit_log 的行（rg 实证仅本函数）。
+ * 返回裁剪条数，实际裁剪时 console 留痕（GRILL O5：不进 audit_log——那会讽刺地占用容量）。
+ */
+export function pruneAudit(db: DatabaseSync, cap: number): number {
+  const r = db
+    .prepare("DELETE FROM audit_log WHERE id <= (SELECT MAX(id) FROM audit_log) - ?")
+    .run(cap);
+  const n = Number(r.changes);
+  if (n > 0) console.log(`[audit] pruned ${n} oldest entries (cap=${cap})`);
+  return n;
+}
+
 export function insertAudit(
   db: DatabaseSync,
   userId: number,
@@ -491,6 +508,7 @@ export function insertAudit(
   resourceType: string,
   resourceId: string | number,
   detail?: unknown,
+  cap: number = AUDIT_MAX_ROWS,
 ): void {
   try {
     db.prepare(
@@ -499,22 +517,53 @@ export function insertAudit(
       new Date().toISOString(), userId, username, action, resourceType, String(resourceId),
       detail ? JSON.stringify(detail).slice(0, 500) : null,
     );
+    try {
+      pruneAudit(db, cap);
+    } catch (err) {
+      // 裁剪失败与写入失败分离留痕——排障时不得误报（M8 REVIEW 修复）
+      console.error("[audit] prune failed:", err);
+    }
   } catch (err) {
     // best-effort 不阻断业务，但必须留痕（PRD：失败记 stderr）
     console.error("[audit] insert failed:", err);
   }
 }
 
-export function listAudit(db: DatabaseSync, limit: number, offset: number): Array<AuditEntry> {
+export interface AuditQuery {
+  limit: number;
+  offset: number;
+  action?: string;
+  username?: string;
+  resourceType?: string;
+  resourceId?: string;
+  /** M8/V1：非 admin 自查时强制传入——服务端收敛，不信任客户端 */
+  userId?: number;
+}
+
+export function listAudit(db: DatabaseSync, q: AuditQuery): { entries: Array<AuditEntry>; total: number } {
+  const cond: string[] = [];
+  const params: Array<string | number> = [];
+  if (q.action) { cond.push("action = ?"); params.push(q.action); }
+  if (q.username) { cond.push("username = ?"); params.push(q.username); }
+  if (q.resourceType) { cond.push("resource_type = ?"); params.push(q.resourceType); }
+  if (q.resourceId) { cond.push("resource_id = ?"); params.push(q.resourceId); }
+  if (q.userId !== undefined) { cond.push("user_id = ?"); params.push(q.userId); }
+  const where = cond.length > 0 ? ` WHERE ${cond.join(" AND ")}` : "";
+  const total = Number(
+    (db.prepare(`SELECT COUNT(*) AS n FROM audit_log${where}`).get(...params) as { n: number }).n,
+  );
   const rows = db
-    .prepare("SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?")
-    .all(limit, offset) as Array<Record<string, unknown>>;
-  return rows.map((row) => ({
-    id: Number(row.id), ts: String(row.ts), user_id: Number(row.user_id),
-    username: String(row.username), action: String(row.action),
-    resource_type: String(row.resource_type), resource_id: String(row.resource_id),
-    detail: row.detail_json ? String(row.detail_json) : null,
-  }));
+    .prepare(`SELECT * FROM audit_log${where} ORDER BY id DESC LIMIT ? OFFSET ?`)
+    .all(...params, q.limit, q.offset) as Array<Record<string, unknown>>;
+  return {
+    total,
+    entries: rows.map((row) => ({
+      id: Number(row.id), ts: String(row.ts), user_id: Number(row.user_id),
+      username: String(row.username), action: String(row.action),
+      resource_type: String(row.resource_type), resource_id: String(row.resource_id),
+      detail: row.detail_json ? String(row.detail_json) : null,
+    })),
+  };
 }
 
 export function listAuditForResource(

@@ -109,3 +109,38 @@ test("admin can manage users, editor/viewer cannot", async () => {
   const a = await fetch(`${baseUrl}/api/users`, { headers: { cookie: cookies.admin! } });
   expect(a.status).toBe(200);
 });
+
+test("V4/O3 positive: admin can trigger editor's pipeline, ownership chain intact", async () => {
+  // editor 造出带 recipe 的自有管道
+  const ds = await upload(cookies.editor!);
+  const write = await fetch(`${baseUrl}/api/datasets/${ds}/operations`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: cookies.editor! },
+    body: JSON.stringify({ operations: [{ op: "core/mass-edit", engineConfig: { facets: [], mode: "row-based" }, columnName: "city", expression: "value", edits: [{ from: ["广州市"], to: "广州" }] }] }),
+  });
+  expect(write.status).toBe(200);
+  const createRes = await fetch(`${baseUrl}/api/pipelines`, {
+    method: "POST", headers: { "content-type": "application/json", cookie: cookies.editor! },
+    body: JSON.stringify({ dataset_id: ds, name: "ed-pipe-o3" }),
+  });
+  expect(createRes.status).toBe(200);
+  const pipe = (await createRes.json()) as { id: number; recipe: unknown[] };
+  expect(pipe.recipe.length).toBeGreaterThan(0);
+
+  // admin 触发他人（editor）的管道 → 202（canTrigger: admin=true）
+  const trig = await fetch(`${baseUrl}/api/pipelines/${pipe.id}/trigger`, {
+    method: "POST", headers: { cookie: cookies.admin! },
+  });
+  expect(trig.status).toBe(202);
+  const { run_id } = (await trig.json()) as { run_id: number };
+
+  // 归属链完整：editor 在自己的 runs 列表可见该 run
+  const runs = (await (await fetch(`${baseUrl}/api/pipelines/${pipe.id}/runs`, {
+    headers: { cookie: cookies.editor! },
+  })).json()) as { runs: Array<{ id: number }> };
+  expect(runs.runs.some((r) => r.id === run_id)).toBe(true);
+  // GRILL O9 直接断言：run 的 pipeline_id 匹配（REVIEW：此前仅间接覆盖）
+  const run = (await (await fetch(`${baseUrl}/api/runs/${run_id}`, {
+    headers: { cookie: cookies.editor! },
+  })).json()) as { pipeline_id: number };
+  expect(run.pipeline_id).toBe(pipe.id);
+});

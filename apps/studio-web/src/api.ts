@@ -337,6 +337,39 @@ export interface AuditEvent {
   action: string;
 }
 
+export interface AuditEntryFull {
+  id: number;
+  ts: string;
+  user_id: number;
+  username: string;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  detail: string | null;
+}
+
+export interface AuditQueryParams {
+  limit?: number;
+  offset?: number;
+  action?: string;
+  username?: string;
+  resourceType?: string;
+  resourceId?: string;
+}
+
+export async function listAudit(
+  params: AuditQueryParams,
+): Promise<{ audit: AuditEntryFull[]; total: number }> {
+  const qs = new URLSearchParams();
+  if (params.limit !== undefined) qs.set("limit", String(params.limit));
+  if (params.offset !== undefined) qs.set("offset", String(params.offset));
+  if (params.action) qs.set("action", params.action);
+  if (params.username) qs.set("username", params.username);
+  if (params.resourceType) qs.set("resource_type", params.resourceType);
+  if (params.resourceId) qs.set("resource_id", params.resourceId);
+  return json<{ audit: AuditEntryFull[]; total: number }>(await fetch(`/api/audit?${qs.toString()}`));
+}
+
 export async function getLineage(
   datasetId: number,
 ): Promise<{ versions: LineageVersion[]; recent_audit?: AuditEvent[] }> {
