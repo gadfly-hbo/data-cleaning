@@ -69,6 +69,23 @@ CREATE TABLE IF NOT EXISTS users (
   disabled INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  prefix TEXT NOT NULL,
+  key_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  jti TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT
+);
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -390,6 +407,17 @@ export interface UserRecord {
   role: "admin" | "editor" | "viewer";
   disabled: boolean;
   created_at: string;
+  /** M9/V4：重置密码后首次登录强制改密 */
+  must_change_password: boolean;
+}
+
+function toUser(row: Record<string, unknown>): UserRecord {
+  return {
+    id: Number(row.id), username: String(row.username),
+    role: String(row.role) as "admin" | "editor" | "viewer",
+    disabled: Number(row.disabled) === 1, created_at: String(row.created_at),
+    must_change_password: Number(row.must_change_password ?? 0) === 1,
+  };
 }
 
 export function userCount(db: DatabaseSync): number {
@@ -407,7 +435,7 @@ export function insertUser(
   const r = db
     .prepare("INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)")
     .run(username, passwordHash, role, now);
-  return { id: Number(r.lastInsertRowid), username, role, disabled: false, created_at: now };
+  return { id: Number(r.lastInsertRowid), username, role, disabled: false, created_at: now, must_change_password: false };
 }
 
 export function getUserByName(db: DatabaseSync, username: string): (UserRecord & { password_hash: string }) | null {
@@ -415,28 +443,18 @@ export function getUserByName(db: DatabaseSync, username: string): (UserRecord &
     .prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE")
     .get(username) as Record<string, unknown> | undefined;
   if (!row) return null;
-  return {
-    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "editor" | "viewer",
-    disabled: Number(row.disabled) === 1, created_at: String(row.created_at),
-    password_hash: String(row.password_hash),
-  };
+  return { ...toUser(row), password_hash: String(row.password_hash) };
 }
 
 export function getUser(db: DatabaseSync, id: number): UserRecord | null {
   const row = db.prepare("SELECT * FROM users WHERE id = ?").get(id) as Record<string, unknown> | undefined;
   if (!row) return null;
-  return {
-    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "editor" | "viewer",
-    disabled: Number(row.disabled) === 1, created_at: String(row.created_at),
-  };
+  return toUser(row);
 }
 
 export function listUsers(db: DatabaseSync): Array<UserRecord> {
   const rows = db.prepare("SELECT * FROM users ORDER BY id").all() as Array<Record<string, unknown>>;
-  return rows.map((row) => ({
-    id: Number(row.id), username: String(row.username), role: String(row.role) as "admin" | "editor" | "viewer",
-    disabled: Number(row.disabled) === 1, created_at: String(row.created_at),
-  }));
+  return rows.map(toUser);
 }
 
 export function setUserDisabled(db: DatabaseSync, id: number, disabled: boolean): void {
@@ -445,6 +463,21 @@ export function setUserDisabled(db: DatabaseSync, id: number, disabled: boolean)
 
 export function resetUserPassword(db: DatabaseSync, id: number, passwordHash: string): void {
   db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(passwordHash, id);
+}
+
+/** M9/V4：强制改密标志（admin 重置置 1；用户改密后清 0） */
+export function setMustChangePassword(db: DatabaseSync, id: number, flag: boolean): void {
+  db.prepare("UPDATE users SET must_change_password = ? WHERE id = ?").run(flag ? 1 : 0, id);
+}
+
+/** M9/V4 幂等迁移：users 加 must_change_password 列（pragma 检查模式同 M6 owner_id） */
+export function ensureMustChangeColumn(db: DatabaseSync): void {
+  const has = db
+    .prepare("SELECT COUNT(*) AS n FROM pragma_table_info('users') WHERE name = 'must_change_password'")
+    .get() as { n: number };
+  if (has.n === 0) {
+    db.prepare("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0").run();
+  }
 }
 
 /** 存量迁移（M6/U1，幂等）：owner 为 NULL 的业务行归属首管理员——setup 后调用。 */
@@ -469,6 +502,111 @@ export function backfillOwnerToAdmin(db: DatabaseSync): number {
   return changed;
 }
 
+
+// ===== API keys（M9/V2）=====
+
+export interface ApiKeyRecord {
+  id: number;
+  user_id: number;
+  name: string;
+  prefix: string;
+  key_hash: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+function toApiKey(row: Record<string, unknown>): ApiKeyRecord {
+  return {
+    id: Number(row.id), user_id: Number(row.user_id), name: String(row.name),
+    prefix: String(row.prefix), key_hash: String(row.key_hash),
+    created_at: String(row.created_at),
+    last_used_at: row.last_used_at ? String(row.last_used_at) : null,
+    revoked_at: row.revoked_at ? String(row.revoked_at) : null,
+  };
+}
+
+export function insertApiKey(
+  db: DatabaseSync, userId: number, name: string, prefix: string, keyHash: string,
+): ApiKeyRecord {
+  const r = db.prepare(
+    "INSERT INTO api_keys (user_id, name, prefix, key_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+  ).run(userId, name, prefix, keyHash, new Date().toISOString());
+  return toApiKey(db.prepare("SELECT * FROM api_keys WHERE id = ?").get(Number(r.lastInsertRowid)) as Record<string, unknown>);
+}
+
+/** 有效（未吊销）key 按哈希查——哈希本身即等值键，无需时序比较 */
+export function getApiKeyByHash(db: DatabaseSync, keyHash: string): ApiKeyRecord | null {
+  const row = db.prepare("SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL")
+    .get(keyHash) as Record<string, unknown> | undefined;
+  return row ? toApiKey(row) : null;
+}
+
+export function listApiKeys(db: DatabaseSync, userId: number): Array<Omit<ApiKeyRecord, "key_hash">> {
+  const rows = db.prepare("SELECT * FROM api_keys WHERE user_id = ? ORDER BY id DESC")
+    .all(userId) as Array<Record<string, unknown>>;
+  return rows.map((row) => {
+    const rec = toApiKey(row);
+    const { key_hash, ...rest } = rec;
+    void key_hash; // 绝不出库给列表接口
+    return rest;
+  });
+}
+
+/** 吊销（幂等语义由调用层 404 表达——重复删/删他人 = 不存在） */
+export function revokeApiKey(db: DatabaseSync, id: number): boolean {
+  const r = db.prepare("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+    .run(new Date().toISOString(), id);
+  return Number(r.changes) > 0;
+}
+
+/** last_used_at 节流更新（60s 窗口——由调用层比较后决定） */
+export function touchApiKey(db: DatabaseSync, id: number, ts: string): void {
+  db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(ts, id);
+}
+
+// ===== 会话记录（M9/V3）=====
+
+export interface SessionRecord {
+  jti: string;
+  user_id: number;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+}
+
+export function insertSession(db: DatabaseSync, jti: string, userId: number, expiresAt: string): void {
+  db.prepare(
+    "INSERT INTO sessions (jti, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+  ).run(jti, userId, new Date().toISOString(), expiresAt);
+}
+
+function toSession(row: Record<string, unknown>): SessionRecord {
+  return {
+    jti: String(row.jti), user_id: Number(row.user_id),
+    created_at: String(row.created_at), expires_at: String(row.expires_at),
+    revoked_at: row.revoked_at ? String(row.revoked_at) : null,
+  };
+}
+
+export function getSession(db: DatabaseSync, jti: string): SessionRecord | null {
+  const row = db.prepare("SELECT * FROM sessions WHERE jti = ?").get(jti) as Record<string, unknown> | undefined;
+  return row ? toSession(row) : null;
+}
+
+export function revokeSession(db: DatabaseSync, jti: string): boolean {
+  const r = db.prepare("UPDATE sessions SET revoked_at = ? WHERE jti = ? AND revoked_at IS NULL")
+    .run(new Date().toISOString(), jti);
+  return Number(r.changes) > 0;
+}
+
+/** 懒清扫：查询时顺带删除已过期行（GRILL Q7——不设定时任务） */
+export function listSessions(db: DatabaseSync, userId: number): SessionRecord[] {
+  db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(new Date().toISOString());
+  const rows = db.prepare("SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC")
+    .all(userId) as Array<Record<string, unknown>>;
+  return rows.map(toSession);
+}
 
 // ===== 审计日志（M7/V3，append-only）=====
 

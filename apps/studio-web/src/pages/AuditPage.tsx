@@ -9,9 +9,10 @@ const KNOWN_ACTIONS = [
   "login", "logout", "dataset_upload", "operations_apply", "history_restore",
   "pipeline_create", "pipeline_trigger", "db_fetch",
   "user_create", "user_disable", "user_reset_password",
+  "apikey_create", "apikey_revoke", "session_revoke", "password_change",
 ];
 
-const RESOURCE_TYPES = ["dataset", "pipeline", "user"];
+const RESOURCE_TYPES = ["dataset", "pipeline", "user", "apikey", "session"];
 
 function fmtTs(ts: string): string {
   // 本地时间简式，足够排障定位；完整值在 detail 提示外不需要

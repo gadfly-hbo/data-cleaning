@@ -56,6 +56,8 @@ export interface AuthUser {
   id: number;
   username: string;
   role: "admin" | "editor" | "viewer";
+  /** M9/V4：true 时前端强制跳 /change-password */
+  must_change_password: boolean;
 }
 
 export async function authStatus(): Promise<{ needs_setup: boolean }> {
@@ -84,6 +86,17 @@ export async function login(username: string, password: string): Promise<AuthUse
 
 export async function logout(): Promise<void> {
   await fetch("/api/auth/logout", { method: "POST" });
+}
+
+/** M9/V4：改密（强制/自愿共用） */
+export async function changePassword(oldPassword: string, newPassword: string): Promise<void> {
+  await json(
+    await fetch("/api/auth/change-password", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    }),
+  );
 }
 
 export async function me(): Promise<AuthUser> {

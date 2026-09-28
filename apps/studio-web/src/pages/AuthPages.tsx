@@ -50,7 +50,7 @@ export function SetupPage() {
         <input className="border border-border rounded-sm bg-surface px-2 py-1.5 text-[13px]" value={username} disabled={busy} onChange={(e) => setUsername(e.target.value)} data-testid="setup-username" />
       </label>
       <label className="grid gap-1">
-        <span className="text-text-2 text-[11.5px]">密码（≥8 字符）</span>
+        <span className="text-text-2 text-[11.5px]">密码（≥8 字符，至少两类：小写/大写/数字/符号）</span>
         <input type="password" className="border border-border rounded-sm bg-surface px-2 py-1.5 text-[13px]" value={password} disabled={busy} onChange={(e) => setPassword(e.target.value)} data-testid="setup-password" />
       </label>
       {error && <div className="text-fail text-[11.5px]" data-testid="setup-error">{error}</div>}
@@ -78,8 +78,9 @@ export function LoginPage() {
     setBusy(true);
     setError(null);
     try {
-      await login(username.trim(), password);
-      navigate("/");
+      const user = await login(username.trim(), password);
+      // M9/V4：被重置密码的用户必须先改密
+      navigate(user.must_change_password ? "/change-password" : "/");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

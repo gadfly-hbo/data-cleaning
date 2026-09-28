@@ -7,12 +7,14 @@ import { PipelinesPage } from "./pages/PipelinesPage.js";
 import { DataSourcePage } from "./pages/DataSourcePage.js";
 import { AuditPage } from "./pages/AuditPage.js";
 import { LoginPage, SetupPage } from "./pages/AuthPages.js";
+import { ChangePasswordPage } from "./pages/ChangePasswordPage.js";
 import { DatasetPage } from "./pages/DatasetPage.js";
 import "./index.css";
 
 const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
   { path: "/setup", element: <SetupPage /> },
+  { path: "/change-password", element: <ChangePasswordPage /> },
   {
     element: <AppShell />,
     children: [

@@ -15,6 +15,8 @@ export const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
 export interface SessionPayload {
   uid: number;
   exp: number;
+  /** M9/V3：会话记录表主键——吊销/查询的锚点；存量无 jti 的 cookie 由调用层回退信任签名 */
+  jti?: string;
 }
 
 /** 会话密钥：workspace/.session-key（0600，32B hex），首启生成（N3）。 */
@@ -71,6 +73,9 @@ export async function verifyPassword(hashed: string, plain: string): Promise<boo
 
 export function validatePassword(plain: string): string | null {
   if (plain.length < 8) return "密码至少 8 个字符";
+  // M9/V1 复杂度：至少两类字符集（小写/大写/数字/符号）——避免过度策略伤本地工具可用性
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((re) => re.test(plain)).length;
+  if (classes < 2) return "密码需包含至少两类字符（小写/大写/数字/符号）";
   return null;
 }
 

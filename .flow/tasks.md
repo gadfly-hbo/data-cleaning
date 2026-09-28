@@ -1,58 +1,52 @@
-# M8 任务拆解（tracer-bullet 垂直切片）
+# M9 任务拆解（tracer-bullet 垂直切片）
 
-> 来源：`.flow/prd.md`（含 GRILL O1-O10 决议）+ `.flow/proposal.md`。拆解自批准。
-> 插曲修复（未提交，随本 flow SHIP 入库）：pybridge/tests/test_pipeline.py fixture 补 `-x refine.headless=true`。
+> 来源：`.flow/prd.md`（含 GRILL Q1-Q10 决议）+ `.flow/proposal.md`。拆解自批准。
 
-- [x] 1. V1 审计查询 API 扩展（过滤 + total + 角色收敛）
-- [x] 2. V2 审计保留策略（pruneAudit + insertAudit 内联裁剪）
-- [x] 3. V3 容器引擎生命周期修复（entrypoint exec 直达 node + 清理陈旧 .engine-port）
-- [x] 4. V4 role-matrix O3 正例（admin 触发他人 pipeline）
-- [x] 5. V5 审计中心页（路由 + 导航 + 页面 + README 披露）
+- [x] 1. V1 密码策略 + 登录限流（复杂度/429 锁定/内存计数）
+- [x] 2. V2 API-key 认证（表/签发/中间件/吊销/审计 13→14 类动作）
+- [x] 3. V3 会话记录与吊销（sessions 表/jti/兼容回退/懒清扫）
+- [x] 4. V4 强制改密（must_change_password/change-password 端点/前端独立路由）
 
-## 1. V1 审计查询 API 扩展
+## 1. V1 密码策略 + 登录限流
 
-端到端行为：`GET /api/audit` 支持 `action/username/resource_type/resource_id` 精确过滤（参数化），响应含 `total`（同条件 COUNT）；非 admin 强制 `user_id=self`（viewer/editor 200 自查，不再 403）；admin 全量。时间倒序、limit≤200 不变。
+端到端行为：建号/重置/改密时密码需 ≥8 且两类字符集（单类 422 文案明确）；同一用户名连续 5 次登录失败锁 5 分钟，锁定期正确密码也 429 + Retry-After，成功登录清零。
 
-- db.ts：`listAudit(db, {limit, offset, action?, username?, resourceType?, resourceId?, userId?})` 返回 `{ entries, total }`；WHERE 子句按可选参数拼接 + 参数绑定（禁字符串拼接值）。
-- app.ts：/api/audit 读 query 参数；非 admin 注入 actor.id 为 userId，忽略 username 参数。
-- 测试（audit.test.ts 扩展）：过滤命中/不命中矩阵；viewer/editor 仅见自己（制造他人记录）；admin 见他人；total 正确；401 未认证。
-- Blocked by：无。User stories：1/2/3/4/5。
+- auth.ts：`validatePassword` 加两类字符集检查（存量用户登录不受影响）。
+- app.ts login handler：内存 Map 计数（键 toLowerCase），锁定期 429 + `retry_after_seconds`；锁定期跳过 verify（不泄露存在性，与哑哈希路径共存）；成功清零。
+- 测试（auth.test.ts 扩展）：复杂度 422/通过；5 败 → 429 + Retry-After；锁内正确密码 429；等待/新用户隔离；成功后计数清零可再败 5 次。
+- Blocked by：无。User stories：5。
 
-## 2. V2 审计保留策略
+## 2. V2 API-key 认证
 
-端到端行为：audit_log 超 100,000 条时自动裁剪最旧，写入路径不变（无 UPDATE），stderr 可见裁剪日志。
+端到端行为：用户 `POST /api/apikeys {name}` → 201 一次性明文 `dck_...`；`x-api-key` 头调用全 API（权限=属主角色）；列表/删除自管，admin 可代管；吊销即失效；`apikey_create`/`apikey_revoke` 入审计（全量 14 类清单更新）。
 
-- db.ts：`pruneAudit(db, cap)`（`DELETE FROM audit_log WHERE id <= (SELECT MAX(id) FROM audit_log) - ?`——id 单调区间删除；等价性依赖全仓无中段删除，REVIEW 轮 1 回写确认）；`insertAudit` 写入后内联调用（cap 为模块常量 100_000）；console.log 一行；裁剪失败独立记 `[audit] prune failed`。
-- 测试：探针 SQLite 库插入小 cap（直接调 pruneAudit）断言最旧被裁、最新保留；insertAudit 后行数不超 cap。
-- Blocked by：无（与 V1 同文件不同函数，冲突面小）。User stories：6。
+- db.ts：api_keys 表 + CRUD（listApiKeys/insertApiKey/revokeApiKey/getApiKeyByHash）。
+- app.ts：端点三件套 + preHandler Q2 语义（头存在只按 key，不回退）+ last_used_at 60s 节流。
+- AuditPage KNOWN_ACTIONS 扩至 13 类（+apikey_create/apikey_revoke）；audit.test.ts 全 action 回归清单逐步扩至终态 15 类。
+- 测试（apikeys.test.ts）：生命周期/一次性明文/列表无 hash/删除后 401/权限继承（viewer key 上传 403）/坏 key 401/并存不回退/日志不打印 key。
+- Blocked by：无。User stories：1/2/3/4。
 
-## 3. V3 容器引擎生命周期修复
+## 3. V3 会话记录与吊销
 
-端到端行为：docker stop 时 SIGTERM 直达 node → app.close() → 引擎 TERM 优雅落盘（不再依赖 npm 转发）；容器每次启动清掉陈旧的 workspace/.engine-port。
+端到端行为：login/setup 签发会话入库（jti）；`GET /api/sessions` 看自己的（admin 可看他人）；`DELETE /api/sessions/:jti` 吊销后该会话 401；存量无记录 cookie 回退信任签名不受影响；`session_revoke` 入审计（15 类动作清单）。
 
-- docker/entrypoint.sh：`rm -f workspace/.engine-port`；末行改 `exec /app/node_modules/.bin/tsx services/studio-api/src/server.ts`。
-- 验证：`sh -n` 语法检查 + 本地实测等价命令（`node node_modules/.bin/tsx services/studio-api/src/server.ts` 起服务响应 /api/health，随后优雅杀掉）——O7 已证 REPO_ROOT 由 import.meta.url 推导，cwd 无关。
-- Blocked by：无。User stories：9/10。
+- auth.ts：SessionPayload 加 jti；签发侧生成。
+- db.ts：sessions 表 + 幂等迁移；CRUD + 懒清扫（查询时删过期）。
+- app.ts：preHandler 查表（无记录→回退）；端点两件套 + admin user_id 过滤；`session_revoke` 入审计（14 类阶段）。
+- 测试（sessions.test.ts）：签发可见/吊销 401/存量回退/懒清扫/admin 视角。
+- Blocked by：无（与 V2 同区不同件）。User stories：6/9。
 
-## 4. V4 role-matrix O3 正例
+## 4. V4 强制改密
 
-端到端行为：admin 触发 editor 所属 pipeline → 202，run 归属链完整（run.pipeline_id 匹配、editor 在 runs 列表可见）。
+端到端行为：admin 重置密码置 `must_change_password=1`；登录响应与 me 带标志；前端登录后跳 `/change-password`，验证旧密码（临时密码）+ 新复杂度密码，成功后清标志回首页。
 
-- role-matrix.test.ts 新增一个 test：setupAuth 造 admin+editor；editor 建 pipeline（注入 runPybridge mock）；admin trigger → 202 + 断言；editor runs 可见。
-- Blocked by：无。User stories：8。
-
-## 5. V5 审计中心页
-
-端到端行为：侧栏「审计」入口 → /audit 页；admin 见过滤栏（action 下拉 11 类/username/resource_type/resource_id）+ 分页 + 流水表；非 admin 无 username 过滤、页头「仅显示我的操作」；detail 原样截断 ~100 字符 title 悬浮；action chip；脚注披露保留策略。
-
-- api.ts：`listAudit(params)` 客户端封装（带 total）。
-- main.tsx 路由 /audit + AppShell 导航入口（管道之后，全角色可见）。
-- pages/AuditPage.tsx：过滤栏 + 分页 + 表；me() 角色自适应。
-- README：审计保留策略一节（上限 10 万条，自动裁剪最旧）。
-- 测试（audit.test.tsx）：admin 渲染过滤栏与 total；非 admin 无 username 过滤且有「仅显示我的操作」；行渲染 chip + detail 截断。
-- Blocked by：V1。User stories：1-5/7。
+- db.ts：users 加列 must_change_password（幂等 ALTER，pragma 检查模式同 owner_id）；setMustChangePassword。
+- app.ts：reset-password 置位；`POST /api/auth/change-password`（验证旧密码、复杂度、成功后清标志+审计 password_change）；login/me 响应带标志。
+- web：AuthUser 类型 + ChangePasswordPage + 路由 + LoginPage 跳转逻辑。
+- 测试：API 置位/改密成功清零/旧密码错 403/复杂度 422；web 跳转与表单。
+- Blocked by：V1（复杂度函数复用）。User stories：7/8。
 
 ## 验收总线
 
-- verify gate 沿用 M7 全量命令；`.engine-port` 驱动复用探测不被破坏（orphan-sweep 测试仍绿）。
-- README 环境限制披露段补一句：entrypoint 修复为静态审查+本地等价实测，容器内首验随首次真实构建。
+- verify gate 沿用 M8 全量命令；现有测试断言零改动全绿（仅清单式更新：审计 action 随 V2/V3/V4 扩至终态 15 类、me/login 响应新增 must_change_password 字段）。
+- README 多用户说明补 API-key 用法（curl 示例）与会话/限流边界披露。

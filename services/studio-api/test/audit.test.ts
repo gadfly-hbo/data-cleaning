@@ -229,6 +229,29 @@ test("all audit actions covered (round-2 B2 regression lock)", async () => {
     method: "POST", headers: { "content-type": "application/json", cookie },
     body: JSON.stringify({ kind: "sqlite", params: { file: probeDb }, table: "t" }),
   });
+  // M9 新增 4 类审计的真实触发（REVIEW 轮 1 MAJOR：回归清单扩至终态 15 类且各有触发路径）
+  // apikey_create / apikey_revoke
+  const keyRes = await fetch(`${baseUrl}/api/apikeys`, {
+    method: "POST", headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ name: "audit-regression" }),
+  });
+  const keyId = ((await keyRes.json()) as { id: number }).id;
+  await fetch(`${baseUrl}/api/apikeys/${keyId}`, { method: "DELETE", headers: { cookie } });
+  // session_revoke：吊销自己的一个会话
+  const sessList = (await (await fetch(`${baseUrl}/api/sessions`, { headers: { cookie } })).json()) as {
+    sessions: Array<{ jti: string }>;
+  };
+  await fetch(`${baseUrl}/api/sessions/${sessList.sessions[0]!.jti}`, { method: "DELETE", headers: { cookie } });
+  // password_change：改密一次再改回（保住后续登录）
+  await fetch(`${baseUrl}/api/auth/change-password`, {
+    method: "POST", headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ old_password: "admin-pass-123", new_password: "audit-pass-123" }),
+  });
+  await fetch(`${baseUrl}/api/auth/change-password`, {
+    method: "POST", headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ old_password: "audit-pass-123", new_password: "admin-pass-123" }),
+  });
+
   await fetch(`${baseUrl}/api/auth/logout`, { method: "POST", headers: { cookie } });
   const relogin = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST", headers: { "content-type": "application/json" },
@@ -236,14 +259,14 @@ test("all audit actions covered (round-2 B2 regression lock)", async () => {
   });
   cookie = (relogin.headers.get("set-cookie") ?? "").split(";")[0]!;
 
-  const all = (await (await fetch(`${baseUrl}/api/audit?limit=50`, { headers: { cookie } })).json()) as {
+  const all = (await (await fetch(`${baseUrl}/api/audit?limit=100`, { headers: { cookie } })).json()) as {
     audit: Array<{ action: string }>;
   };
   const seen = new Set(all.audit.map((a) => a.action));
   for (const action of [
     "login", "logout", "dataset_upload", "operations_apply", "pipeline_create",
     "pipeline_trigger", "user_create", "user_disable", "user_reset_password", "history_restore",
-    "db_fetch",
+    "db_fetch", "apikey_create", "apikey_revoke", "session_revoke", "password_change",
   ]) {
     expect(seen.has(action), `action ${action}`).toBe(true);
   }

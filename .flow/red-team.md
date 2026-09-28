@@ -1,47 +1,46 @@
-# Red-Team: M8 = 审计 UI 页 + 债务清偿（entrypoint .engine-port / O3 正例 / 审计保留策略）
+# Red-Team: M9 = 认证强化（API-key 服务认证 / 密码策略 / 会话管理增强）
 
 > 评审对象：`.flow/proposal.md`。日期：2026-09-28。结论：**go**。
 
 ## Top Kill-Assumptions（按 影响×可能性×可测性 排序）
 
-### K1 — Claim：四个工作项都有真实缺陷背书（不是臆造债）
-- **Fails if：** 其中某项在现有代码已被覆盖——如 /api/audit 已带过滤、已有 pruning、O3 已被其他测试间接覆盖。
-- **Evidence to get this week：** 代码核实（开工时已做）：①app.ts:161 `/api/audit` 仅 admin + limit/offset，**无 action/user/resource 过滤、无非 admin 自查端点**（非 admin 一律 403）；②全仓 grep 无 `DELETE FROM audit`/prune/retention——audit_log 只增不减；③role-matrix.test.ts 全部 4 个 test 中无 "admin 触发他人 pipeline" 正例；④entrypoint.sh 全文 8 行无 `.engine-port` 处理（M7 端口随机化晚于 Dockerfile 定稿）。四项均属实。
-- **Kill criterion：** REVIEW 阶段若 grep 到任一已实现，该项移出本期并回写 proposal。
-- **Cheapest test：** 已完成（本文件即证据）；REVIEW 复验。
+### K1 — Claim：三个支柱都是真实缺口（不是臆造需求）
+- **Fails if：** 现有代码已具备其中某项——如已有 API-key、已有密码复杂度、已有登录限流、已有服务端会话记录。
+- **Evidence to get this week：** 代码核实（开工时已做）：①`rg api.?key` 全仓零命中（无 API-key 概念）；②auth.ts:72-75 `validatePassword` 仅长度 ≥8；③login handler（app.ts:341）无任何失败计数/锁逻辑（仅有哑哈希 timing 防护）；④auth.ts:1-5 注释明言 session 无服务端状态（payload {uid,exp}+签名，登出=客户端删 cookie）。四项均属实。
+- **Kill criterion：** REVIEW 阶段 grep 到任一已实现 → 该项移出本期。
+- **Cheapest test：** 已完成；REVIEW 复验。
 
-### K2 — Claim：审计保留策略「容量上限+裁剪最旧」可接受，不破坏审计初衷
-- **Fails if：** 审计日志的消费场景是**合规留痕/不可抵赖**——裁剪删除记录本身破坏不可变性，比膨胀更伤。
-- **Evidence：** 本平台定位=本地/小团队数据清洗工作台（README 自述），非合规审计产品；append-only 指的是**写入路径**（无 UPDATE），消费方为 admin 排障。11 类 action 均含 resource 归属，裁剪只丢最旧历史。
-- **Kill criterion：** 若认定「审计不可删除」为产品约束 → 改为容量告警（不删）+ 文档披露。
-- **Cheapest test：** 把「裁剪是产品决策，须在 UI/README 披露」写进 PRD，用户在 diff 门一并裁决。
+### K2 — Claim：API-key 是真实使用场景（而非过度设计）
+- **Fails if：** 本产品的消费方永远只有浏览器 UI——没人会拿脚本调 API，做了无人用。
+- **Evidence：** 平台定位含「清洗管道」且 README 明示 API 面；管道定版/触发天然适合 curl/CI 集成；M7 审计页 story 10 的运营方视角同理。实现成本集中在认证中间件一处，业务端点零改动。
+- **Kill criterion：** GRILL 若无法定义出「谁、用什么、调哪个端点」的具体场景 → 降级为不做。
+- **Cheapest test：** GRILL 用例具体化（脚本触发管道 + 查询审计两个场景写进 PRD）。
 
-### K3 — Claim：entrypoint 写 `.engine-port` 是正确修法，不引入新故障
-- **Fails if：** 端口文件残留指向死端口（容器重启后旧引擎没了）→ 复用探活失败——查 engine.ts，探活失败走正常启动分支，语义正确；真风险是**探活误打中恰好监听同随机端口的无关服务**，概率极低且仅限回环场景。单容器单 API 进程部署下不成立。
-- **Kill criterion：** 若 docker-compose 配 replicas>1 或多 API 实例共享 workspace → 端口文件成竞态资源，需另行设计。
-- **Cheapest test：** 静态审查 compose 文件（单 service 单副本——已确认）+ entrypoint 幂等性推演（探活先行已有代码路径兜底）。
+### K3 — Claim：登录限流的内存计数在本地单机模型下足够
+- **Fails if：** 需要跨进程/跨重启持久（多实例部署、攻击者重启规避）——本平台单 API 进程（docker compose 单副本已确认），内存计数覆盖运行期；重启清零是可接受的已知边界（重启本身是物理级事件，本地威胁模型下攻击者已有更高权限）。
+- **Kill criterion：** 若部署形态出现多副本 → 内存计数必须换共享存储，本期设计需加抽象缝。
+- **Cheapest test：** PRD 写明「单进程内存计数，重启清零为已披露边界」；测试覆盖锁定期与解锁。
 
-### K4 — Claim：非 admin 用户自查审计是真实需求
-- **Fails if：** 实际部署多为单 admin 使用，自查端点无人用。
-- **Evidence：** M6 已引入多用户 + M7 三级 RBAC，用户管理页已存在；operations_apply/history_restore 等用户行为已入日志，用户核对「我做过什么」是自然诉求。实现成本=一个 `WHERE user_id=?` 端点。
-- **Kill criterion：** PRD 若发现前端无合适挂载点 → 降级为仅 admin。
-- **Cheapest test：** PRD 定页面信息架构时确认入口（AppShell 导航或用户菜单）。
+### K4 — Claim：会话记录表（jti 入库）不破坏现有无状态设计优势
+- **Fails if：** 每请求查表成为热点（本地单机 QPS 极低，不构成）；或迁移破坏存量 cookie（设计为「查表失败/无记录 → 回退信任签名」即兼容）。
+- **Kill criterion：** 若兼容回退导致吊销形同虚设（删除 session key 文件已是核选项）→ 改为纯新会话签发时入库，存量会话自然过期（7 天内收敛）。
+- **Cheapest test：** GRILL 定兼容策略；测试覆盖「旧 cookie 无记录仍可用 + 新会话可吊销」两条路径。
 
-### K5 — Claim：本期零新依赖可完成
-- **Fails if：** 过滤/分页/时间显示需要引入库。
-- **Evidence：** listAudit 已存在（SQL LIMIT/OFFSET），过滤=加 WHERE 条件，前端沿用现有组件模式；web api.ts 已有审计调用先例。
-- **Kill criterion：** PRD 若引入任何 npm/py 依赖 → 先过许可证门并回写 proposal。
-- **Cheapest test：** PRD 显式声明依赖清单=空；REVIEW 检查 package.json diff。
+### K5 — Claim：零新依赖可完成
+- **Fails if：** API-key 需要 JWT 库（不需要——自建签名/哈希即可）、限流需要 Redis（不需要——内存 Map）、密码复杂度需要 zxcvbn（不需要——正则类检查）。
+- **Evidence：** 全部可用 node:crypto + 现有 @node-rs/argon2 完成；rg 确认无新增面。
+- **Kill criterion：** PRD 若引入任何依赖 → 先过许可证门并回写 proposal。
+- **Cheapest test：** PRD 显式声明依赖=空；REVIEW 查 package.json/pyproject diff。
 
 ## What's Well-Reasoned
 
-- **范围裁剪正确**：协作分享/API-key/密码策略均为独立里程碑体量，混入本期会稀释 review 焦点。backlog 四项是 M7 收尾时 fresh reviewer 亲自背书过的残留项。
-- **债务 1 性质判断准确**：功能仍正确（复用探活失败会走正常启动），属资源浪费+stop 语义分叉的潜在缺陷而非 BLOCKER，用「债务」而非「事故」定性恰当。
-- **「不动引擎契约/pybridge」边界**与本期工作面完全吻合——审计查询、UI、entrypoint、测试四处均不触碰引擎协议。
+- **范围裁剪正确**：协作分享是独立大里程碑；OAuth/SSO 与本地单机定位冲突，明确排除正确。密码策略选「两类字符集」而非「大写+小写+数字+符号」的过度策略，符合本地工具可用性。
+- **「权限继承角色、复用现有守卫」是关键正确决策**：API-key 走同一 actor() 管线，业务端点零改动，审计/隔离语义自动一致——避免第二套权限矩阵。
+- **会话增强选「可查可吊销」而非 key 轮换**：轮换=全员登出是破坏性操作，与「最小 diff、不顺手重构」约束一致。
 
 ## What I Couldn't Assess
 
-- docker 首次真实构建仍环境受限：entrypoint 修复只能静态审查+推演，无法容器内实测（README 已披露，本期不加重该限制）。
-- audit_log 实际增长速率未知，容量上限 N 的取值需 PRD 给可辩护默认（建议先按条数硬上限，不做时间维度）。
+- 前端「强制改密」流程的具体形态（modal vs 独立页）需 GRILL/PRD 定，涉及路由守卫改动面。
+- API-key 的速率/权限收窄（只读 key）是否必要——本地场景大概率 YAGNI，PRD 需显式声明不做。
 
 ## Verdict: **go**

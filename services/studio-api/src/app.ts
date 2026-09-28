@@ -1,6 +1,6 @@
 /** studio-api 应用工厂：数据集上传/列表/详情/预览行（G2 端点）。 */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -12,6 +12,8 @@ import { createReadStream } from "node:fs";
 import {
   backfillOwnerToAdmin,
   migrateLegacyRoles,
+  ensureMustChangeColumn,
+  setMustChangePassword,
   insertAudit,
   listAudit,
   listAuditForResource,
@@ -24,6 +26,15 @@ import {
   resetUserPassword,
   setUserDisabled,
   userCount,
+  getApiKeyByHash,
+  insertApiKey,
+  listApiKeys,
+  revokeApiKey,
+  touchApiKey,
+  getSession,
+  insertSession,
+  listSessions,
+  revokeSession,
   getPipeline,
   getRun,
   getVersion,
@@ -69,6 +80,8 @@ export interface AppOptions {
   enableScheduler?: boolean;
   /** pybridge 执行器（上传后同步算画像/跑分）；缺省用真实 venv 执行器 */
   runPybridge?: (task: unknown) => Promise<unknown>;
+  /** 登录限流阈值（M9/V1）；缺省 5 次失败锁 5 分钟。单进程内存计数，重启清零为披露边界 */
+  rateLimit?: { maxFails?: number; lockMs?: number };
 }
 
 function toApi(rec: DatasetRecord) {
@@ -89,6 +102,7 @@ export async function buildApp(opts: AppOptions = {}) {
   const workspace = opts.workspaceDir ?? path.join(REPO_ROOT, "workspace");
   const db = openDb(path.join(workspace, "studio.db"));
   migrateLegacyRoles(db);
+  ensureMustChangeColumn(db); // M9/V4
   const sessionKey = new SessionKey(path.join(workspace, ".session-key"));
   for (const staleId of failStaleRuns(db)) {
     // 上次进程退出遗留的 running run 一律置 fail（否则管道永久 409/调度停摆）；
@@ -235,6 +249,7 @@ export async function buildApp(opts: AppOptions = {}) {
     const target = getUser(db, Number(id));
     if (!target) return reply.code(404).send({ error: `user ${id} not found` });
     resetUserPassword(db, target.id, await hashPassword(body.password));
+    setMustChangePassword(db, target.id, true); // M9/V4：重置后首次登录强制改密
     audit(req, "user_reset_password", "user", target.id, { username: target.username });
     return { ok: true };
   });
@@ -307,6 +322,13 @@ export async function buildApp(opts: AppOptions = {}) {
   function sessionCookie(token: string): string {
     return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`;
   }
+  /** M9/V3：签发会话 = 签名 cookie + jti 入库（吊销/查询锚点） */
+  function issueSession(userId: number): string {
+    const jti = randomBytes(16).toString("hex");
+    const exp = Date.now() + SESSION_TTL_MS;
+    insertSession(db, jti, userId, new Date(exp).toISOString());
+    return sessionKey.sign({ uid: userId, exp, jti });
+  }
   function clearSessionCookie(): string {
     return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
   }
@@ -334,14 +356,35 @@ export async function buildApp(opts: AppOptions = {}) {
     if (userCount(db) > 0) return reply.code(409).send({ error: "setup already done" });
     const user = insertUser(db, body.username, hash, "admin");
     backfillOwnerToAdmin(db); // 存量数据归属首管理员（幂等）
-    const token = sessionKey.sign({ uid: user.id, exp: Date.now() + SESSION_TTL_MS });
-    return reply.header("set-cookie", sessionCookie(token)).send({ id: user.id, username: user.username, role: user.role });
+    const token = issueSession(user.id);
+    return reply.header("set-cookie", sessionCookie(token)).send({
+      id: user.id, username: user.username, role: user.role, must_change_password: user.must_change_password,
+    });
   });
+
+  // M9/V1 登录限流：内存 Map（键 toLowerCase——COLLATE NOCASE 语义），单进程模型，重启清零披露边界
+  const loginGuard = new Map<string, { fails: number; lockedUntil: number }>();
+  const RL_MAX_FAILS = opts.rateLimit?.maxFails ?? 5;
+  const RL_LOCK_MS = opts.rateLimit?.lockMs ?? 5 * 60 * 1000;
 
   app.post("/api/auth/login", async (req, reply) => {
     const body = req.body as { username?: string; password?: string } | null | undefined;
     if (!body?.username || !body?.password) {
       return reply.code(400).send({ error: "username and password required" });
+    }
+    const guardKey = body.username.toLowerCase();
+    const guard = loginGuard.get(guardKey);
+    if (guard && guard.lockedUntil > Date.now()) {
+      // 锁定期跳过 verify——不泄露用户存在性，不给试探窗口
+      const retryAfterSec = Math.ceil((guard.lockedUntil - Date.now()) / 1000);
+      return reply.code(429)
+        .header("retry-after", String(retryAfterSec))
+        .send({ error: "失败次数过多，请稍后再试", retry_after_seconds: retryAfterSec });
+    }
+    // 锁已过期：刑罚服满，失败计数清零重计（REVIEW 轮 1——否则过期后单次失败立即重锁成事实永久锁）
+    if (guard && guard.lockedUntil > 0) {
+      guard.fails = 0;
+      guard.lockedUntil = 0;
     }
     const user = getUserByName(db, body.username);
     // V5-④：不存在用户也做哑哈希恒时 verify——消除用户名枚举 timing 侧信道
@@ -349,29 +392,62 @@ export async function buildApp(opts: AppOptions = {}) {
       ? await verifyPassword(user.password_hash, body.password)
       : await verifyPassword(DUMMY_ARGON2_HASH, body.password);
     if (!user || !ok) {
+      const g = guard ?? { fails: 0, lockedUntil: 0 };
+      g.fails += 1;
+      if (g.fails >= RL_MAX_FAILS) {
+        g.lockedUntil = Date.now() + RL_LOCK_MS;
+        loginGuard.set(guardKey, g);
+        const retryAfterSec = Math.ceil(RL_LOCK_MS / 1000);
+        return reply.code(429)
+          .header("retry-after", String(retryAfterSec))
+          .send({ error: "失败次数过多，请稍后再试", retry_after_seconds: retryAfterSec });
+      }
+      loginGuard.set(guardKey, g);
       return reply.code(401).send({ error: "用户名或密码错误" });
     }
+    // disabled 检查先于计数清零：停用账号的正确密码不得洗掉失败计数（REVIEW 轮 1）
     if (user.disabled) return reply.code(401).send({ error: "账号已停用" });
-    const token = sessionKey.sign({ uid: user.id, exp: Date.now() + SESSION_TTL_MS });
+    loginGuard.delete(guardKey); // 成功清零
+    const token = issueSession(user.id);
     insertAudit(db, user.id, user.username, "login", "user", user.id);
-    return reply.header("set-cookie", sessionCookie(token)).send({ id: user.id, username: user.username, role: user.role });
+    return reply.header("set-cookie", sessionCookie(token)).send({
+      id: user.id, username: user.username, role: user.role, must_change_password: user.must_change_password,
+    });
   });
 
   app.post("/api/auth/logout", async (req, reply) => {
     const payload = sessionKey.verify(readSessionToken(req));
     if (payload) {
+      // M9/V3：登出即吊销服务端会话——旧 cookie 重放不再有效
+      if (payload.jti) revokeSession(db, payload.jti);
       const u = getUser(db, payload.uid);
       if (u) insertAudit(db, u.id, u.username, "logout", "user", u.id);
     }
     return reply.header("set-cookie", clearSessionCookie()).send({ ok: true });
   });
 
-  app.get("/api/auth/me", async (req, reply) => {
-    const payload = sessionKey.verify(readSessionToken(req));
-    if (!payload) return reply.code(401).send({ error: "not logged in" });
-    const user = getUser(db, payload.uid);
-    if (!user || user.disabled) return reply.code(401).send({ error: "not logged in" });
-    return user;
+  app.get("/api/auth/me", async (req) => {
+    // M9/V2：统一经 preHandler 注入的 actor——cookie 与 x-api-key 两条路径同权
+    return actor(req);
+  });
+
+  // M9/V4：改密（强制/自愿共用）——必须验证旧密码，防会话劫持者绕改密
+  app.post("/api/auth/change-password", async (req, reply) => {
+    const u = actor(req);
+    const body = req.body as { old_password?: string; new_password?: string } | null | undefined;
+    if (!body?.old_password || !body?.new_password) {
+      return reply.code(400).send({ error: "old_password and new_password required" });
+    }
+    const rec = getUserByName(db, u.username);
+    if (!rec || !(await verifyPassword(rec.password_hash, body.old_password))) {
+      return reply.code(403).send({ error: "旧密码错误" });
+    }
+    const pErr = validatePassword(body.new_password);
+    if (pErr) return reply.code(422).send({ error: pErr });
+    resetUserPassword(db, u.id, await hashPassword(body.new_password));
+    setMustChangePassword(db, u.id, false);
+    audit(req, "password_change", "user", u.id, { username: u.username });
+    return { ok: true };
   });
 
   // auth 中间件：白名单外一律需要有效 session（U1）
@@ -386,14 +462,104 @@ export async function buildApp(opts: AppOptions = {}) {
   app.addHook("preHandler", async (req, reply) => {
     if (!req.url.startsWith("/api/") || AUTH_WHITELIST.has(req.url.split("?")[0]!)) return;
     // 静态资源与 SPA 路由不经此守卫（非 /api/）
+    // M9/V2 API-key：头存在时只按 key 认证（有效→属主身份；无效/吊销→401 不回退 cookie——GRILL Q2）
+    const keyHeader = req.headers["x-api-key"];
+    if (typeof keyHeader === "string" && keyHeader.length > 0) {
+      const rec = getApiKeyByHash(db, createHash("sha256").update(keyHeader).digest("hex"));
+      if (!rec) return reply.code(401).send({ error: "invalid api key" });
+      const user = getUser(db, rec.user_id);
+      if (!user || user.disabled) return reply.code(401).send({ error: "invalid api key" });
+      // last_used_at 60s 节流，避免每请求写库
+      const now = Date.now();
+      if (!rec.last_used_at || now - Date.parse(rec.last_used_at) > 60_000) {
+        touchApiKey(db, rec.id, new Date(now).toISOString());
+      }
+      (req as unknown as { user: typeof user & { username: string } }).user = user;
+      return;
+    }
     const payload = sessionKey.verify(readSessionToken(req));
     if (!payload) return reply.code(401).send({ error: "not logged in" });
+    // M9/V3：有 jti 的会话查表——吊销/过期即 401；无记录（M9 前签发的存量 cookie）回退信任签名
+    if (payload.jti) {
+      const sess = getSession(db, payload.jti);
+      if (sess && (sess.revoked_at !== null || Date.parse(sess.expires_at) < Date.now())) {
+        return reply.code(401).send({ error: "not logged in" });
+      }
+    }
     const user = getUser(db, payload.uid);
     if (!user || user.disabled) return reply.code(401).send({ error: "not logged in" });
     (req as unknown as { user: typeof user & { username: string } }).user = user;
   });
 
   app.get("/api/health", async () => ({ status: "ok", engine: engineManager.running }));
+
+  // ===== API keys（M9/V2）=====
+
+  app.post("/api/apikeys", async (req, reply) => {
+    const u = actor(req);
+    const body = req.body as { name?: string } | null | undefined;
+    if (!body?.name || typeof body.name !== "string" || body.name.trim().length === 0) {
+      return reply.code(400).send({ error: "name required" });
+    }
+    const plaintext = `dck_${randomBytes(32).toString("base64url")}`;
+    const rec = insertApiKey(
+      db, u.id, body.name.trim(), plaintext.slice(0, 12),
+      createHash("sha256").update(plaintext).digest("hex"),
+    );
+    audit(req, "apikey_create", "apikey", rec.id, { name: rec.name, prefix: rec.prefix });
+    // 明文仅此一次响应——库存哈希，绝不回显
+    return reply.code(201).send({ id: rec.id, name: rec.name, prefix: rec.prefix, key: plaintext });
+  });
+
+  app.get("/api/apikeys", async (req, reply) => {
+    const u = actor(req);
+    const query = req.query as { user_id?: string };
+    let userId = u.id;
+    if (query.user_id !== undefined) {
+      if (u.role !== "admin") return reply.code(403).send({ error: "admin only" });
+      userId = Number(query.user_id);
+      if (!Number.isInteger(userId) || !getUser(db, userId)) {
+        return reply.code(404).send({ error: "user not found" });
+      }
+    }
+    return { keys: listApiKeys(db, userId) };
+  });
+
+  app.delete("/api/apikeys/:id", async (req, reply) => {
+    const u = actor(req);
+    const { id } = req.params as { id: string };
+    const mine = listApiKeys(db, u.id).some((k) => k.id === Number(id));
+    if (!mine && u.role !== "admin") return reply.code(404).send({ error: "api key not found" });
+    if (!revokeApiKey(db, Number(id))) return reply.code(404).send({ error: "api key not found" });
+    audit(req, "apikey_revoke", "apikey", Number(id), { id: Number(id) });
+    return { ok: true };
+  });
+
+  // ===== 会话管理（M9/V3）=====
+
+  app.get("/api/sessions", async (req, reply) => {
+    const u = actor(req);
+    const query = req.query as { user_id?: string };
+    let userId = u.id;
+    if (query.user_id !== undefined) {
+      if (u.role !== "admin") return reply.code(403).send({ error: "admin only" });
+      userId = Number(query.user_id);
+      if (!Number.isInteger(userId) || !getUser(db, userId)) {
+        return reply.code(404).send({ error: "user not found" });
+      }
+    }
+    return { sessions: listSessions(db, userId) };
+  });
+
+  app.delete("/api/sessions/:jti", async (req, reply) => {
+    const u = actor(req);
+    const { jti } = req.params as { jti: string };
+    const mine = listSessions(db, u.id).some((s) => s.jti === jti);
+    if (!mine && u.role !== "admin") return reply.code(404).send({ error: "session not found" });
+    if (!revokeSession(db, jti)) return reply.code(404).send({ error: "session not found" });
+    audit(req, "session_revoke", "session", jti, { jti: jti.slice(0, 8) });
+    return { ok: true };
+  });
 
   app.post("/api/datasets", async (req, reply) => {
     if (!canCreate(actor(req))) return reply.code(403).send({ error: "viewer cannot upload" });
