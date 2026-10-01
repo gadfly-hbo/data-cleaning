@@ -1,52 +1,75 @@
 @import "tailwindcss";
 
-/* JuanerAI Xanthil 暖灰青工作台 token（~/.zcode/design/DESIGN.md，2026-09-23 版） */
+/* JuanerAI Xanthil 橘accent 桌面工作台 token（~/.zcode/design/DESIGN.md，2026-09-28 契约版） */
 @theme {
-  --color-bg: #f7f6f3;
+  --color-bg: #eceae5;
+  --color-shell: #f7f6f3;
   --color-surface: #ffffff;
-  --color-surface-2: #f0efec;
-  --color-border: #e2e0db;
-  --color-border-strong: #cfcdc6;
-  --color-text: #1f1e1b;
-  --color-text-2: #5b5952;
-  --color-text-3: #8a877e;
-  --color-accent: #0f766e;
-  --color-accent-strong: #0b5c55;
-  --color-accent-soft: #e6f4f2;
-  --color-accent-line: #bfe3de;
-  --color-ok: #166534;
-  --color-ok-soft: #e7f4ea;
-  --color-ok-line: #cbe6d2;
-  --color-warn: #92400e;
-  --color-warn-soft: #fdf1e2;
+  --color-surface-2: #f4f3ef;
+  --color-soft: #f7f6f2;
+  --color-border: #e5e2dc;
+  --color-border-strong: #d8d3cb;
+  --color-text: #1d2027;
+  --color-text-2: #6f7480;
+  --color-text-3: #8a8076;
+  --color-accent: #e8643a;
+  --color-accent-strong: #bf4927;
+  --color-accent-soft: #fff1e8;
+  --color-accent-line: #e8c1b4;
+  --color-navy: #263442;
+  --color-navy-soft: #edf3f5;
+  --color-navy-ink: #496271;
+  --color-primary: #e8643a;
+  --color-ok: #176247;
+  --color-ok-soft: #def3e9;
+  --color-ok-line: #bfddcf;
+  --color-warn: #855211;
+  --color-warn-soft: #fff1d6;
   --color-warn-line: #f0dfc2;
-  --color-fail: #b91c1c;
-  --color-fail-soft: #fbeaea;
+  --color-fail: #952f2f;
+  --color-fail-soft: #ffe5e5;
   --color-fail-line: #f3caca;
   --color-queue: #6d5bd0;
   --color-queue-ink: #5b48c0;
   --color-queue-soft: #efecfb;
   --color-queue-line: #d9d2f5;
+  --color-dot-amber: #d28c2d;
+  --color-dot-green: #3e9a73;
+  --color-dot-gray: #aaaaaa;
+  --color-dot-red: #c84c4c;
 
-  --font-sans: -apple-system, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-sans: Inter, ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
 
-  --radius-base: 10px;
-  --radius-sm: 6px;
+  --radius-base: 14px;
+  --radius-sm: 8px;
+
+  --shadow-card: 0 3px 12px rgba(40, 36, 30, 0.04);
+  --shadow-float: 0 18px 48px rgba(35, 35, 30, 0.12);
 }
 
 @layer components {
   .card {
-    @apply bg-surface border border-border rounded-base;
+    @apply bg-surface border border-border rounded-base shadow-card;
   }
   .btn-primary {
     @apply bg-accent text-white rounded-sm px-3.5 py-1.5 text-[13px] font-medium
-      hover:bg-accent-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1
+      hover:bg-accent-strong focus-visible:outline-3 focus-visible:outline-accent/28 focus-visible:outline-offset-2
       disabled:opacity-50 disabled:pointer-events-none;
   }
   .btn-secondary {
     @apply bg-surface text-text border border-border rounded-sm px-3.5 py-1.5 text-[13px]
-      hover:border-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1
+      hover:border-border-strong focus-visible:outline-3 focus-visible:outline-accent/28 focus-visible:outline-offset-2
+      disabled:opacity-50 disabled:pointer-events-none;
+  }
+  .btn-ghost {
+    @apply bg-transparent text-text-2 rounded-sm px-3 py-1.5 text-[13px]
+      hover:bg-surface-2 focus-visible:outline-3 focus-visible:outline-accent/28 focus-visible:outline-offset-2
+      disabled:opacity-50 disabled:pointer-events-none;
+  }
+  .btn-danger {
+    @apply bg-[#fffafa] text-fail border border-fail-line rounded-sm px-3.5 py-1.5 text-[13px]
+      hover:bg-fail-soft focus-visible:outline-3 focus-visible:outline-accent/28 focus-visible:outline-offset-2
       disabled:opacity-50 disabled:pointer-events-none;
   }
   .chip {
@@ -69,6 +92,9 @@
   .empty {
     @apply border border-dashed border-border-strong rounded-base bg-surface
       flex flex-col items-center gap-3 px-6 py-10 text-[13px] text-text-2;
+  }
+  .eyebrow {
+    @apply text-[10px] font-bold tracking-[0.13em] uppercase text-text-3;
   }
   .mono {
     font-family: var(--font-mono);
