@@ -27,17 +27,15 @@ export function ActionCards({
 
   return (
     <div className="space-y-3">
-      {/* 分类过滤栏 */}
-      <div className="flex items-center gap-1.5 border-b border-border/40 pb-2">
+      {/* 分类过滤栏：蓝图分段控件 Segment */}
+      <div className="segment-group">
         {ACTION_CATEGORIES.map((cat) => (
           <button
             key={cat.key}
             type="button"
             onClick={() => setActiveCategory(cat.key)}
-            className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
-              activeCategory === cat.key
-                ? "bg-accent/15 text-accent font-semibold"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+            className={`segment-btn ${
+              activeCategory === cat.key ? "segment-btn-active" : ""
             }`}
           >
             {cat.label}
@@ -45,7 +43,7 @@ export function ActionCards({
         ))}
       </div>
 
-      {/* 卡片网格 */}
+      {/* 卡片网格：符合蓝图 10px 圆角与双描边选中高亮契约 */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
         {filteredCards.map((card) => {
           const isSelected = activeCard?.id === card.id;
@@ -55,38 +53,38 @@ export function ActionCards({
               onClick={() => {
                 if (!disabled && selectedColumn) onSelectCard(card);
               }}
-              className={`p-3 rounded-lg border transition-all text-left flex flex-col justify-between ${
+              className={`p-3.5 rounded-[10px] border transition-all text-left flex flex-col justify-between ${
                 !selectedColumn || disabled
-                  ? "opacity-60 cursor-not-allowed border-border/40 bg-surface/30"
+                  ? "opacity-55 cursor-not-allowed border-line/60 bg-soft/50"
                   : isSelected
-                  ? "border-accent ring-1 ring-accent bg-accent/5 cursor-pointer shadow-sm"
-                  : "border-border/60 bg-surface/70 hover:border-accent/40 hover:bg-surface cursor-pointer"
+                  ? "border-accent ring-1 ring-accent bg-accent-soft/30 cursor-pointer"
+                  : "border-line bg-surface hover:border-accent-line hover:bg-soft/40 cursor-pointer"
               }`}
             >
               <div>
-                <div className="flex items-center justify-between gap-1.5 mb-1">
-                  <span className="text-xs font-medium text-foreground">
-                    {card.title}
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-base leading-none">{card.icon}</span>
+                    <span className="font-[650] text-[13px] text-ink">{card.title}</span>
+                  </div>
+                  <span className="chip bg-soft text-muted border-line mono text-[10.5px]">
+                    {card.category}
                   </span>
-                  {card.tag && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-accent/20 text-accent">
-                      {card.tag}
-                    </span>
-                  )}
                 </div>
-                <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-2">
-                  {card.description}
-                </p>
+                <p className="text-[12px] text-muted leading-relaxed">{card.description}</p>
               </div>
 
-              <div className="mt-2.5 pt-2 border-t border-border/30 flex items-center justify-between text-[11px]">
-                <span className="text-muted-foreground/70">{card.categoryLabel}</span>
+              <div className="mt-2.5 pt-2 border-t border-line/60 flex items-center justify-between text-[11px]">
+                <span className="text-muted">
+                  示例：<span className="mono text-ink">{card.exampleBefore}</span> →{" "}
+                  <span className="mono text-accent font-semibold">{card.exampleAfter}</span>
+                </span>
                 <span
-                  className={`font-medium ${
-                    isSelected ? "text-accent" : "text-muted-foreground"
+                  className={`font-semibold ${
+                    isSelected ? "text-accent" : "text-muted"
                   }`}
                 >
-                  {isSelected ? "已选定预览中 →" : "点击预览 →"}
+                  {isSelected ? "已选定预览 ↗" : "点击试用"}
                 </span>
               </div>
             </div>

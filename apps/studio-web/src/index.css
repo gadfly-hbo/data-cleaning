@@ -1,100 +1,139 @@
 @import "tailwindcss";
 
-/* JuanerAI Xanthil 橘accent 桌面工作台 token（~/.zcode/design/DESIGN.md，2026-09-28 契约版） */
+/* JuanerAI 系统蓝图 v4.2 设计语言（Capability Blueprint · 2026-10-04 全局契约版） */
+/* 暖灰纸感底 + 铁锈橘 accent + 深藏青辅助的文档式工作台 */
 @theme {
-  --color-bg: #eceae5;
-  --color-shell: #f7f6f3;
+  --color-bg: #f7f6f3;
+  --color-panel: #ffffff;
   --color-surface: #ffffff;
-  --color-surface-2: #f4f3ef;
-  --color-soft: #f7f6f2;
-  --color-border: #e5e2dc;
-  --color-border-strong: #d8d3cb;
-  --color-text: #1d2027;
-  --color-text-2: #6f7480;
-  --color-text-3: #8a8076;
-  --color-accent: #e8643a;
-  --color-accent-strong: #bf4927;
-  --color-accent-soft: #fff1e8;
-  --color-accent-line: #e8c1b4;
+  --color-surface-2: #f0efeb;
+  --color-soft: #f0efeb;
+  --color-border: #dedcd6;
+  --color-border-strong: #c8c5bc;
+  --color-line: #dedcd6;
+
+  --color-text: #242830;
+  --color-ink: #242830;
+  --color-text-2: #626773;
+  --color-muted: #626773;
+  --color-text-3: #8a8e99;
+
+  --color-accent: #b44626;
+  --color-accent-strong: #963519;
+  --color-accent-soft: #fcf0e9;
+  --color-accent-line: #eac4b5;
+  --color-primary: #b44626;
+
   --color-navy: #263442;
-  --color-navy-soft: #edf3f5;
-  --color-navy-ink: #496271;
-  --color-primary: #e8643a;
+  --color-navy-line: #758290;
+  --color-navy-text: #d6dde4;
+  --color-navy-soft: #2e3e4f;
+
   --color-ok: #176247;
   --color-ok-soft: #def3e9;
   --color-ok-line: #bfddcf;
-  --color-warn: #855211;
-  --color-warn-soft: #fff1d6;
-  --color-warn-line: #f0dfc2;
+
+  --color-warn: #815916;
+  --color-warn-soft: #faf3e4;
+  --color-warn-line: #e6d2a9;
+
   --color-fail: #952f2f;
   --color-fail-soft: #ffe5e5;
   --color-fail-line: #f3caca;
-  --color-queue: #6d5bd0;
-  --color-queue-ink: #5b48c0;
-  --color-queue-soft: #efecfb;
-  --color-queue-line: #d9d2f5;
-  --color-dot-amber: #d28c2d;
-  --color-dot-green: #3e9a73;
-  --color-dot-gray: #aaaaaa;
-  --color-dot-red: #c84c4c;
 
-  --font-sans: Inter, ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --color-queue: #574ca8;
+  --color-queue-ink: #483d96;
+  --color-queue-soft: #eeecf9;
+  --color-queue-line: #d8d3f4;
 
-  --radius-base: 14px;
+  --color-backdrop: #20293270;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  --radius-panel: 12px;
+  --radius-change: 10px;
+  --radius-segment: 9px;
+  --radius-button: 8px;
+  --radius-field: 7px;
+  --radius-badge: 5px;
+  --radius-dialog: 16px;
+  --radius-mark: 10px;
+
+  --radius-base: 12px;
   --radius-sm: 8px;
 
-  --shadow-card: 0 3px 12px rgba(40, 36, 30, 0.04);
-  --shadow-float: 0 18px 48px rgba(35, 35, 30, 0.12);
+  --shadow-card: 0 1px 3px rgba(36, 40, 48, 0.04);
+  --shadow-dialog: 0 18px 60px rgba(25, 38, 49, 0.14);
 }
 
 @layer components {
   .card {
-    @apply bg-surface border border-border rounded-base shadow-card;
+    @apply bg-surface border border-line rounded-[12px];
   }
   .btn-primary {
-    @apply bg-accent text-white rounded-sm px-3.5 py-1.5 text-[13px] font-medium
-      hover:bg-accent-strong focus-visible:outline-3 focus-visible:outline-accent/28 focus-visible:outline-offset-2
-      disabled:opacity-50 disabled:pointer-events-none;
+    @apply bg-accent text-white rounded-[8px] px-3.5 py-1.5 text-[13px] font-medium
+      hover:bg-accent-strong focus-visible:outline-3 focus-visible:outline-accent/30 focus-visible:outline-offset-2
+      disabled:opacity-50 disabled:pointer-events-none transition-colors;
   }
   .btn-secondary {
-    @apply bg-surface text-text border border-border rounded-sm px-3.5 py-1.5 text-[13px]
-      hover:border-border-strong focus-visible:outline-3 focus-visible:outline-accent/28 focus-visible:outline-offset-2
-      disabled:opacity-50 disabled:pointer-events-none;
+    @apply bg-surface text-ink border border-line rounded-[8px] px-3.5 py-1.5 text-[13px] font-medium
+      hover:bg-soft focus-visible:outline-3 focus-visible:outline-accent/30 focus-visible:outline-offset-2
+      disabled:opacity-50 disabled:pointer-events-none transition-colors;
   }
   .btn-ghost {
-    @apply bg-transparent text-text-2 rounded-sm px-3 py-1.5 text-[13px]
-      hover:bg-surface-2 focus-visible:outline-3 focus-visible:outline-accent/28 focus-visible:outline-offset-2
-      disabled:opacity-50 disabled:pointer-events-none;
+    @apply bg-transparent text-muted rounded-[8px] px-3 py-1.5 text-[13px]
+      hover:bg-soft hover:text-ink focus-visible:outline-3 focus-visible:outline-accent/30 focus-visible:outline-offset-2
+      disabled:opacity-50 disabled:pointer-events-none transition-colors;
   }
   .btn-danger {
-    @apply bg-[#fffafa] text-fail border border-fail-line rounded-sm px-3.5 py-1.5 text-[13px]
-      hover:bg-fail-soft focus-visible:outline-3 focus-visible:outline-accent/28 focus-visible:outline-offset-2
-      disabled:opacity-50 disabled:pointer-events-none;
+    @apply bg-[#fffafa] text-fail border border-fail-line rounded-[8px] px-3.5 py-1.5 text-[13px]
+      hover:bg-fail-soft focus-visible:outline-3 focus-visible:outline-accent/30 focus-visible:outline-offset-2
+      disabled:opacity-50 disabled:pointer-events-none transition-colors;
   }
   .chip {
-    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11.5px] font-medium border;
+    @apply inline-flex items-center gap-1 rounded-[5px] px-2 py-0.5 text-[11.5px] font-medium border;
   }
   .chip-ok { @apply bg-ok-soft text-ok border-ok-line; }
   .chip-warn { @apply bg-warn-soft text-warn border-warn-line; }
   .chip-fail { @apply bg-fail-soft text-fail border-fail-line; }
   .chip-run { @apply bg-queue-soft text-queue-ink border-queue-line; }
-  .chip-accent { @apply bg-accent-soft text-accent-strong border-accent-line; }
+  .chip-accent { @apply bg-accent-soft text-accent border-accent-line; }
+
+  /* 蓝图深藏青原则横条 Focusbar */
+  .focusbar {
+    @apply bg-navy text-white rounded-[8px] px-4 py-2.5 flex items-center justify-between gap-3 text-[12px];
+  }
+  .focusbar-chip {
+    @apply border border-navy-line/80 px-2 py-0.5 rounded-[4px] text-[11px] font-medium tracking-wide text-white;
+  }
+
+  /* 蓝图分段控件 Segment */
+  .segment-group {
+    @apply bg-soft rounded-[9px] p-1 inline-flex items-center gap-1;
+  }
+  .segment-btn {
+    @apply px-3 py-1 rounded-[7px] text-[12px] font-medium transition-colors text-muted hover:text-ink;
+  }
+  .segment-btn-active {
+    @apply bg-surface text-ink border border-line shadow-sm font-semibold;
+  }
+
   .tbl {
     @apply w-full text-[13px];
   }
   .tbl th {
-    @apply bg-surface-2 text-text-2 text-left font-medium px-3 py-2 whitespace-nowrap border-b border-border;
+    @apply bg-soft text-muted text-left font-medium px-3 py-2 whitespace-nowrap border-b border-line;
   }
   .tbl td {
-    @apply px-3 py-2 border-b border-border align-top max-w-[280px] truncate;
+    @apply px-3 py-2 border-b border-line align-top max-w-[280px] truncate;
   }
   .empty {
-    @apply border border-dashed border-border-strong rounded-base bg-surface
-      flex flex-col items-center gap-3 px-6 py-10 text-[13px] text-text-2;
+    @apply border border-dashed border-border-strong rounded-[12px] bg-surface
+      flex flex-col items-center gap-3 px-6 py-10 text-[13px] text-muted;
   }
   .eyebrow {
-    @apply text-[10px] font-bold tracking-[0.13em] uppercase text-text-3;
+    @apply text-[11px] font-semibold tracking-[0.1em] uppercase text-accent;
   }
   .mono {
     font-family: var(--font-mono);

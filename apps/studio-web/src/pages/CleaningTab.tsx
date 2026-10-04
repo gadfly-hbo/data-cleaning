@@ -276,21 +276,21 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
   }
 
   return (
-    <div className="grid gap-3.5">
+    <div className="grid gap-4">
       {/* 顶部常用业务清洗卡片区（面向非技术运营同学） */}
-      <div className="card p-3.5 border-accent/20 bg-surface/50" data-testid="common-actions-panel">
-        <div className="flex items-center justify-between gap-2 flex-wrap mb-3 border-b border-border/40 pb-2">
+      <div className="card p-4 border border-line bg-surface" data-testid="common-actions-panel">
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-3.5 border-b border-line pb-2.5">
           <div className="flex items-center gap-2">
             <span className="text-base">⚡</span>
-            <span className="font-semibold text-foreground">常用业务清洗卡片</span>
-            <span className="text-muted-foreground text-[11.5px]">
+            <span className="font-[650] text-ink text-[13.5px]">常用业务清洗卡片</span>
+            <span className="text-muted text-[11.5px]">
               （选列后直接点选，所见即所得，无需编写任何公式）
             </span>
           </div>
           <button
             type="button"
             onClick={() => setShowReport(true)}
-            className="px-2.5 py-1 rounded text-xs font-medium border border-accent/40 bg-accent/10 text-accent hover:bg-accent/20 transition-colors flex items-center gap-1.5 cursor-pointer"
+            className="btn-secondary !text-[12px] !py-1 !px-3 flex items-center gap-1.5 cursor-pointer"
             data-testid="open-report-btn"
           >
             <span>📋</span>
@@ -298,12 +298,12 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
           </button>
         </div>
 
-        <div className="space-y-3">
+        <div className="space-y-3.5">
           <div className="max-w-[320px]">
             <label className="grid gap-1">
-              <span className="text-muted-foreground text-[11.5px] font-medium">选择目标列</span>
+              <span className="text-muted text-[11.5px] font-medium">选择目标列</span>
               <select
-                className="fld border border-border rounded-sm bg-surface px-2 py-1.5 text-[13px]"
+                className="fld border border-line rounded-[7px] bg-surface px-2.5 py-1.5 text-[13px] text-ink"
                 value={column}
                 disabled={busy}
                 onChange={(e) => {
@@ -365,17 +365,17 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
         </div>
       </div>
 
-      <div className="card p-3.5" data-testid="operate-panel">
-        <div className="flex items-center gap-2 flex-wrap mb-3">
-          <span className="font-semibold">清洗操作</span>
-          <div className="flex gap-1.5">
+      <div className="card p-4 border border-line bg-surface" data-testid="operate-panel">
+        <div className="flex items-center gap-2.5 flex-wrap mb-3.5">
+          <span className="font-[650] text-ink text-[13.5px]">清洗操作</span>
+          <div className="segment-group">
             {(["replace", "transform", "cluster"] as const).map((m) => (
               <button
                 key={m}
                 type="button"
                 disabled={busy}
                 onClick={() => setMode(m)}
-                className={`chip ${mode === m ? "chip-accent" : "bg-surface text-text-2 border-border"} cursor-pointer`}
+                className={`segment-btn ${mode === m ? "segment-btn-active" : ""}`}
                 aria-pressed={mode === m}
               >
                 {m === "replace" ? "值替换" : m === "transform" ? "文本变换" : "聚类合并"}
