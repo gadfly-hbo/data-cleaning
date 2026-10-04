@@ -1,46 +1,43 @@
-# Red-Team: M9 = 认证强化（API-key 服务认证 / 密码策略 / 会话管理增强）
+# Red-Team: 面向非技术运营人员的数据清洗工作台重构
 
-> 评审对象：`.flow/proposal.md`。日期：2026-09-28。结论：**go**。
+## Top Kill-Assumptions (Ranked)
 
-## Top Kill-Assumptions（按 影响×可能性×可测性 排序）
+### 1. 业务常用卡片覆盖度假设
+- **Claim:** 预制的业务清洗卡片（文本去空格、手机号/日期/金额格式化、智能找错合并、删空行）能覆盖绝大多数非技术运营人员的清洗需求，因而可以将手写 GREL 和复杂原语退居为次要折叠项。
+- **Steelman:** 业务表格脏数据具有高度的重复性和模式化特征（空格、分隔符、非标准日期、货币单位、错别字）。将高频 80% 场景卡片化，彻底消除了用户面对空白输入框的认知障碍。
+- **Fails if:** 实际业务场景中大量存在强依赖跨列逻辑的复杂条件变换，导致卡片无法满足，用户若找不到高级入口会陷入僵局。
+- **Evidence to get this week:** 盘点常用表格清洗动作清单，确认是否都能映射到底层标准 OpenRefine Operations。
+- **Kill criterion:** 核心场景（手机号/日期/金额/去重/空格）中有一半以上无法被参数化卡片表达。
+- **Cheapest test:** 在 UI 上采用“常用场景卡片顶置 + 高级自定义（GREL）折叠”布局，既给小白降噪，又给极客留兜底。
 
-### K1 — Claim：三个支柱都是真实缺口（不是臆造需求）
-- **Fails if：** 现有代码已具备其中某项——如已有 API-key、已有密码复杂度、已有登录限流、已有服务端会话记录。
-- **Evidence to get this week：** 代码核实（开工时已做）：①`rg api.?key` 全仓零命中（无 API-key 概念）；②auth.ts:72-75 `validatePassword` 仅长度 ≥8；③login handler（app.ts:341）无任何失败计数/锁逻辑（仅有哑哈希 timing 防护）；④auth.ts:1-5 注释明言 session 无服务端状态（payload {uid,exp}+签名，登出=客户端删 cookie）。四项均属实。
-- **Kill criterion：** REVIEW 阶段 grep 到任一已实现 → 该项移出本期。
-- **Cheapest test：** 已完成；REVIEW 复验。
+---
 
-### K2 — Claim：API-key 是真实使用场景（而非过度设计）
-- **Fails if：** 本产品的消费方永远只有浏览器 UI——没人会拿脚本调 API，做了无人用。
-- **Evidence：** 平台定位含「清洗管道」且 README 明示 API 面；管道定版/触发天然适合 curl/CI 集成；M7 审计页 story 10 的运营方视角同理。实现成本集中在认证中间件一处，业务端点零改动。
-- **Kill criterion：** GRILL 若无法定义出「谁、用什么、调哪个端点」的具体场景 → 降级为不做。
-- **Cheapest test：** GRILL 用例具体化（脚本触发管道 + 查询审计两个场景写进 PRD）。
+### 2. 方案模板跨文件重放假设
+- **Claim:** 将当前交互操作直接保存为“常用清洗方案”，并在上传新文件时一键重放，能够实现“傻瓜式重复工作自动化”。
+- **Steelman:** 底层已经具备完善的 Recipe JSON 序列化与 Dagster 管道物化引擎，能力完全具备，只差产品语义层的包装。
+- **Fails if:** 新文件的表头列名与录制方案时哪怕差一个字（如“手机” vs “联系电话”），重放就会直接失败。
+- **Evidence to get this week:** 测试 OpenRefine 对同结构/异名列重放时的容错与回显行为。
+- **Kill criterion:** 新文件结构稍微变化即发生不可逆静默崩坏。
+- **Cheapest test:** 方案执行前增加轻量级“列头匹配检查”；完全匹配直接秒跑，列头缺失时给出大白话警示。
 
-### K3 — Claim：登录限流的内存计数在本地单机模型下足够
-- **Fails if：** 需要跨进程/跨重启持久（多实例部署、攻击者重启规避）——本平台单 API 进程（docker compose 单副本已确认），内存计数覆盖运行期；重启清零是可接受的已知边界（重启本身是物理级事件，本地威胁模型下攻击者已有更高权限）。
-- **Kill criterion：** 若部署形态出现多副本 → 内存计数必须换共享存储，本期设计需加抽象缝。
-- **Cheapest test：** PRD 写明「单进程内存计数，重启清零为已披露边界」；测试覆盖锁定期与解锁。
+---
 
-### K4 — Claim：会话记录表（jti 入库）不破坏现有无状态设计优势
-- **Fails if：** 每请求查表成为热点（本地单机 QPS 极低，不构成）；或迁移破坏存量 cookie（设计为「查表失败/无记录 → 回退信任签名」即兼容）。
-- **Kill criterion：** 若兼容回退导致吊销形同虚设（删除 session key 文件已是核选项）→ 改为纯新会话签发时入库，存量会话自然过期（7 天内收敛）。
-- **Cheapest test：** GRILL 定兼容策略；测试覆盖「旧 cookie 无记录仍可用 + 新会话可吊销」两条路径。
+### 3. 一键桌面启动脚本的跨环境鲁棒性
+- **Claim:** 提供 `启动清洗工作台.command` 能够让运营人员完全脱离终端黑窗口，双击即可无感打开并使用。
+- **Steelman:** [`web-crawler`](/Users/huangbo/Dev/Projects/web-crawler) 的实测证明，双击 `.command` 结合自动构建与单实例复用，是非技术人员在 macOS 本地最自然的交互方式。
+- **Fails if:** 本机缺少依赖环境且脚本未能友善引导，导致双击闪退。
+- **Evidence to get this week:** 在无前置准备的 clean 目录下测试脚本错误捕获与提示。
+- **Kill criterion:** 脚本在遇到常见错误（如依赖未装、端口占用）时无法自动恢复或友好提示。
+- **Cheapest test:** 脚本内置对 node、npm、端口占用的预检与友善弹窗提示。
 
-### K5 — Claim：零新依赖可完成
-- **Fails if：** API-key 需要 JWT 库（不需要——自建签名/哈希即可）、限流需要 Redis（不需要——内存 Map）、密码复杂度需要 zxcvbn（不需要——正则类检查）。
-- **Evidence：** 全部可用 node:crypto + 现有 @node-rs/argon2 完成；rg 确认无新增面。
-- **Kill criterion：** PRD 若引入任何依赖 → 先过许可证门并回写 proposal。
-- **Cheapest test：** PRD 显式声明依赖=空；REVIEW 查 package.json/pyproject diff。
+---
 
 ## What's Well-Reasoned
+- **业务出发点准确**：准确识别了“非技术运营”与“数据工程师”在语言和心智模型上的鸿沟，砍掉了不属于运营层面的复杂概念（GREL、DAG、pandera 规则代码）。
+- **底层架构复用**：没有推翻 OpenRefine、Polars、Dagster 等成熟算力，仅做“包装层”与“交互层”重构，改造成本低、收益极高。
+- **数据安全有保障**：保留了不可变版本机制与随时后悔撤销药，给运营人员带来了完全的容错安全感。
 
-- **范围裁剪正确**：协作分享是独立大里程碑；OAuth/SSO 与本地单机定位冲突，明确排除正确。密码策略选「两类字符集」而非「大写+小写+数字+符号」的过度策略，符合本地工具可用性。
-- **「权限继承角色、复用现有守卫」是关键正确决策**：API-key 走同一 actor() 管线，业务端点零改动，审计/隔离语义自动一致——避免第二套权限矩阵。
-- **会话增强选「可查可吊销」而非 key 轮换**：轮换=全员登出是破坏性操作，与「最小 diff、不顺手重构」约束一致。
+---
 
-## What I Couldn't Assess
-
-- 前端「强制改密」流程的具体形态（modal vs 独立页）需 GRILL/PRD 定，涉及路由守卫改动面。
-- API-key 的速率/权限收窄（只读 key）是否必要——本地场景大概率 YAGNI，PRD 需显式声明不做。
-
-## Verdict: **go**
+## Verdict
+**GO**（无致命 Kill 判定；方案合理可行，继续进入 PRD 阶段）。

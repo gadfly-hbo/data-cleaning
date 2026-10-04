@@ -19,8 +19,15 @@ import {
   type History,
 } from "../api.js";
 import { PreviewTable } from "./PreviewTable.js";
+import { ActionCards } from "./ActionCards.js";
+import { DiffPreviewPanel } from "./DiffPreviewPanel.js";
+import { CleaningReportModal } from "./CleaningReportModal.js";
+import {
+  humanizeHistoryDescription,
+  type ActionCard,
+} from "../common-actions.js";
 
-type Mode = "replace" | "transform" | "cluster";
+type Mode = "cards" | "replace" | "transform" | "cluster";
 
 const ENGINE_CONFIG = { facets: [], mode: "row-based" } as const;
 
@@ -51,6 +58,11 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
   const [llmChecked, setLlmChecked] = useState<Record<number, boolean>>({});
   const [llmBusy, setLlmBusy] = useState(false);
   const [llmError, setLlmError] = useState<string | null>(null);
+
+  // 面向非技术运营人员的卡片动作与成果单状态
+  const [selectedCard, setSelectedCard] = useState<ActionCard | null>(null);
+  const [cardInput, setCardInput] = useState<string>("");
+  const [showReport, setShowReport] = useState<boolean>(false);
 
   // 操作面板状态
   const [column, setColumn] = useState("");
@@ -265,6 +277,94 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
 
   return (
     <div className="grid gap-3.5">
+      {/* 顶部常用业务清洗卡片区（面向非技术运营同学） */}
+      <div className="card p-3.5 border-accent/20 bg-surface/50" data-testid="common-actions-panel">
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-3 border-b border-border/40 pb-2">
+          <div className="flex items-center gap-2">
+            <span className="text-base">⚡</span>
+            <span className="font-semibold text-foreground">常用业务清洗卡片</span>
+            <span className="text-muted-foreground text-[11.5px]">
+              （选列后直接点选，所见即所得，无需编写任何公式）
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowReport(true)}
+            className="px-2.5 py-1 rounded text-xs font-medium border border-accent/40 bg-accent/10 text-accent hover:bg-accent/20 transition-colors flex items-center gap-1.5 cursor-pointer"
+            data-testid="open-report-btn"
+          >
+            <span>📋</span>
+            <span>生成清洗成果汇报单</span>
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <div className="max-w-[320px]">
+            <label className="grid gap-1">
+              <span className="text-muted-foreground text-[11.5px] font-medium">选择目标列</span>
+              <select
+                className="fld border border-border rounded-sm bg-surface px-2 py-1.5 text-[13px]"
+                value={column}
+                disabled={busy}
+                onChange={(e) => {
+                  setColumn(e.target.value);
+                  setSelectedOldValues([]);
+                  setSelectedCard(null);
+                }}
+              >
+                {stringColumns.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <ActionCards
+            selectedColumn={column}
+            activeCard={selectedCard}
+            onSelectCard={(c) => {
+              setSelectedCard(c);
+              setCardInput(c.defaultInput ?? "");
+            }}
+            disabled={busy}
+          />
+
+          {selectedCard && (
+            <DiffPreviewPanel
+              selectedColumn={column}
+              activeCard={selectedCard}
+              sampleValues={topValues.map((t) => String(t.value))}
+              customParam={cardInput}
+              onChangeCustomParam={setCardInput}
+              onCancel={() => setSelectedCard(null)}
+              onApply={async () => {
+                const expr = selectedCard.requiresCustomInput
+                  ? selectedCard.expression.replace(
+                      '"未填写"',
+                      JSON.stringify(cardInput || "未填写"),
+                    )
+                  : selectedCard.expression;
+                await guarded(async () => {
+                  await applyOperations(dataset.id, [
+                    {
+                      op: "core/text-transform",
+                      engineConfig: ENGINE_CONFIG,
+                      columnName: column,
+                      expression: expr,
+                      onError: "keep-original",
+                    },
+                  ]);
+                  setSelectedCard(null);
+                });
+              }}
+              busy={busy}
+            />
+          )}
+        </div>
+      </div>
+
       <div className="card p-3.5" data-testid="operate-panel">
         <div className="flex items-center gap-2 flex-wrap mb-3">
           <span className="font-semibold">清洗操作</span>
@@ -651,6 +751,23 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
         <div className="view-title text-[15px] font-semibold mb-2">当前数据预览</div>
         <PreviewTable key={previewKey} datasetId={dataset.id} columns={dataset.columns} />
       </div>
+
+      {showReport && (
+        <CleaningReportModal
+          datasetName={dataset.name}
+          rowCount={dataset.rows}
+          historyStepsCount={history?.past.length ?? 0}
+          actionsApplied={
+            history?.past
+              .map((p) => humanizeHistoryDescription("", p.description))
+              .filter(Boolean) ?? []
+          }
+          onClose={() => setShowReport(false)}
+          onExportCsv={() =>
+            void exportCsv(dataset.id, dataset.name).catch((e: Error) => setError(e.message))
+          }
+        />
+      )}
     </div>
   );
 }
@@ -666,12 +783,13 @@ function HistoryRow({
   busy: boolean;
   onClick: () => void;
 }) {
+  const humanized = humanizeHistoryDescription("", entry.description);
   return (
     <button
       type="button"
       disabled={busy}
       onClick={onClick}
-      className="flex items-center gap-2 px-2.5 py-1.5 rounded-sm bg-surface border border-border hover:border-border-strong text-left cursor-pointer disabled:opacity-50"
+      className="flex items-center gap-2 px-2.5 py-1.5 rounded-sm bg-surface border border-border hover:border-border-strong text-left cursor-pointer disabled:opacity-50 w-full"
     >
       {state === "future" ? (
         <span className="chip chip-run">已撤</span>
@@ -680,8 +798,17 @@ function HistoryRow({
       ) : (
         <span className="chip bg-surface-2 text-text-2 border-border">已做</span>
       )}
-      <span className="truncate">{entry.description}</span>
-      <span className="ml-auto text-text-2 text-[10.5px] mono">{new Date(entry.time).toLocaleTimeString("zh-CN")}</span>
+      <span className="font-semibold text-xs text-foreground shrink-0">{humanized}</span>
+      <span className="truncate text-muted-foreground text-[11px]">{entry.description}</span>
+      <span className="ml-auto flex items-center gap-2 shrink-0">
+        <span className="text-text-2 text-[10.5px] mono">
+          {new Date(entry.time).toLocaleTimeString("zh-CN")}
+        </span>
+        <span className="px-1.5 py-0.5 rounded text-[10px] text-accent border border-accent/40 bg-accent/5">
+          {state === "future" ? "恢复" : "撤销"}
+        </span>
+      </span>
     </button>
   );
 }
+

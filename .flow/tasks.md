@@ -1,52 +1,66 @@
-# M9 任务拆解（tracer-bullet 垂直切片）
+# 任务拆解：面向非技术运营人员的数据清洗工作台重构（Tracer-bullet 垂直切片）
 
-> 来源：`.flow/prd.md`（含 GRILL Q1-Q10 决议）+ `.flow/proposal.md`。拆解自批准。
+- [x] 1. S1 桌面一键启动器与全自动基础设施 (`启动清洗工作台.command`)
+- [x] 2. S2 大白话常用业务清洗动作库（Action Cards 模块化与映射）
+- [x] 3. S3 所见即所得红绿高亮预览与大白话后悔药（WYSIWYG & Safety Net）
+- [x] 4. S4 一键保存为日常方案与一页纸成果汇报单（Template & Report）
 
-- [x] 1. V1 密码策略 + 登录限流（复杂度/429 锁定/内存计数）
-- [x] 2. V2 API-key 认证（表/签发/中间件/吊销/审计 13→14 类动作）
-- [x] 3. V3 会话记录与吊销（sessions 表/jti/兼容回退/懒清扫）
-- [x] 4. V4 强制改密（must_change_password/change-password 端点/前端独立路由）
+---
 
-## 1. V1 密码策略 + 登录限流
+## 1. S1 桌面一键启动器与全自动基础设施
 
-端到端行为：建号/重置/改密时密码需 ≥8 且两类字符集（单类 422 文案明确）；同一用户名连续 5 次登录失败锁 5 分钟，锁定期正确密码也 429 + Retry-After，成功登录清零。
+**端到端行为**：
+运营人员双击仓库根目录的 `启动清洗工作台.command`，终端窗口静默或仅打印友好的指引文本，自动检测 Node/npm 环境、检查前端产物是否需要更新、检查已有 8787 端口或直接启动 Fastify 服务端并拉起/托管 OpenRefine，自动调用系统默认浏览器打开 `http://127.0.0.1:8787`；退出或关闭终端时做孤儿进程清理。
 
-- auth.ts：`validatePassword` 加两类字符集检查（存量用户登录不受影响）。
-- app.ts login handler：内存 Map 计数（键 toLowerCase），锁定期 429 + `retry_after_seconds`；锁定期跳过 verify（不泄露存在性，与哑哈希路径共存）；成功清零。
-- 测试（auth.test.ts 扩展）：复杂度 422/通过；5 败 → 429 + Retry-After；锁内正确密码 429；等待/新用户隔离；成功后计数清零可再败 5 次。
-- Blocked by：无。User stories：5。
+- **工作内容**：
+  - 创建 `启动清洗工作台.command`（赋予可执行权限 `chmod +x`），吸收 `web-crawler` 成熟经验；
+  - 增加环境与依赖缺失时的白话提示引导；
+  - 支持单实例复用提示与自动浏览器唤起；
+  - 编写启动器可执行性与退出清扫的自动化冒烟测试。
+- **User stories**：US1
+- **Blocked by**：无
 
-## 2. V2 API-key 认证
+---
 
-端到端行为：用户 `POST /api/apikeys {name}` → 201 一次性明文 `dck_...`；`x-api-key` 头调用全 API（权限=属主角色）；列表/删除自管，admin 可代管；吊销即失效；`apikey_create`/`apikey_revoke` 入审计（全量 14 类清单更新）。
+## 2. S2 大白话常用业务清洗动作库
 
-- db.ts：api_keys 表 + CRUD（listApiKeys/insertApiKey/revokeApiKey/getApiKeyByHash）。
-- app.ts：端点三件套 + preHandler Q2 语义（头存在只按 key，不回退）+ last_used_at 60s 节流。
-- AuditPage KNOWN_ACTIONS 扩至 13 类（+apikey_create/apikey_revoke）；audit.test.ts 全 action 回归清单逐步扩至终态 15 类。
-- 测试（apikeys.test.ts）：生命周期/一次性明文/列表无 hash/删除后 401/权限继承（viewer key 上传 403）/坏 key 401/并存不回退/日志不打印 key。
-- Blocked by：无。User stories：1/2/3/4。
+**端到端行为**：
+在工作台「清洗」tab 中，将原先暴露的手写 GREL、原始操作列表和复杂技术参数彻底折叠。在顶部呈现显著的“常用业务清洗卡片箱”（文本去多余空格、手机号11位提取、日期统一为YYYY-MM-DD、金额去除符号转数值、删除全空行、空值填充），点击即可选中相应动作并配置极简参数；将“聚类合并”重构为更亲切的“智能找错别字/同名合并”卡片；手写 GREL 折叠为“高级自定义选项”。
 
-## 3. V3 会话记录与吊销
+- **工作内容**：
+  - 定义 `common-actions.ts` 业务动作规范与 OpenRefine GREL/Operation 模板安全映射；
+  - 封装 `ActionCards.tsx` 业务卡片组件（带分类徽标、人话标题、说明与快速操作按钮）；
+  - 重构 `CleaningTab.tsx` 界面布局，实现卡片点选与当前选中列的交互绑定；
+  - 编写常用动作映射与前端卡片渲染的单元测试。
+- **User stories**：US2, US3, US4, US5, US6, US7, US12
+- **Blocked by**：无
 
-端到端行为：login/setup 签发会话入库（jti）；`GET /api/sessions` 看自己的（admin 可看他人）；`DELETE /api/sessions/:jti` 吊销后该会话 401；存量无记录 cookie 回退信任签名不受影响；`session_revoke` 入审计（15 类动作清单）。
+---
 
-- auth.ts：SessionPayload 加 jti；签发侧生成。
-- db.ts：sessions 表 + 幂等迁移；CRUD + 懒清扫（查询时删过期）。
-- app.ts：preHandler 查表（无记录→回退）；端点两件套 + admin user_id 过滤；`session_revoke` 入审计（14 类阶段）。
-- 测试（sessions.test.ts）：签发可见/吊销 401/存量回退/懒清扫/admin 视角。
-- Blocked by：无（与 V2 同区不同件）。User stories：6/9。
+## 3. S3 所见即所得红绿高亮预览与大白话后悔药
 
-## 4. V4 强制改密
+**端到端行为**：
+运营在选中列并点击任何清洗卡片时，界面右侧或弹窗中实时显示选中列前 5~10 行的清洗前后红绿对照对比（原值浅红中划线，新值浅绿高亮）；点击“确认执行”后立刻应用，并在操作历史抽屉中追加一条“10:15 统一手机号格式”大白话记录；每条记录旁常驻【撤销此步骤】按钮，点击立即回滚，且原文件永远安全不可变。
 
-端到端行为：admin 重置密码置 `must_change_password=1`；登录响应与 me 带标志；前端登录后跳 `/change-password`，验证旧密码（临时密码）+ 新复杂度密码，成功后清标志回首页。
+- **工作内容**：
+  - 封装 `DiffPreviewPanel.tsx` 红绿高亮前后对照预览组件；
+  - 封装操作历史的大白话翻译函数（将机器类型转换为自然业务语意）；
+  - 在操作历史面板中提供直观醒目的【撤销此步】与回退确认反馈；
+  - 编写预览对比计算与历史撤销交互测试。
+- **User stories**：US8, US9
+- **Blocked by**：1, 2
 
-- db.ts：users 加列 must_change_password（幂等 ALTER，pragma 检查模式同 owner_id）；setMustChangePassword。
-- app.ts：reset-password 置位；`POST /api/auth/change-password`（验证旧密码、复杂度、成功后清标志+审计 password_change）；login/me 响应带标志。
-- web：AuthUser 类型 + ChangePasswordPage + 路由 + LoginPage 跳转逻辑。
-- 测试：API 置位/改密成功清零/旧密码错 403/复杂度 422；web 跳转与表单。
-- Blocked by：V1（复杂度函数复用）。User stories：7/8。
+---
 
-## 验收总线
+## 4. S4 一键保存为日常方案与一页纸成果汇报单
 
-- verify gate 沿用 M8 全量命令；现有测试断言零改动全绿（仅清单式更新：审计 action 随 V2/V3/V4 扩至终态 15 类、me/login 响应新增 must_change_password 字段）。
-- README 多用户说明补 API-key 用法（curl 示例）与会话/限流边界披露。
+**端到端行为**：
+在清洗流程完成时，界面提供醒目的【保存为日常方案】按钮，让运营输入名称（如“周一销售流水清洗”）；在数据总览或上传页面，用户可直接选择已有方案一键批处理新文件；在导出清洗产物时，提供【生成清洗成果单】按钮，弹出一张优雅的可视化卡片（总结：处理总行数、修复手机号数、格式化日期数、合并错别字数、预估节约手工工时），支持一键复制汇报文本或截图交差。
+
+- **工作内容**：
+  - 封装“保存为日常方案”弹窗，复用现有 Pipeline Recipe 机制；
+  - 封装 `CleaningReportModal.tsx` 清洗体检报告弹窗组件与统计换算逻辑；
+  - 支持一键复制格式化的汇报文案与一键下载清洗后的 Excel；
+  - 编写方案保存、成果统计换算与弹窗交互测试。
+- **User stories**：US10, US11
+- **Blocked by**：3
