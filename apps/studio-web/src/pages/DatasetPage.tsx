@@ -174,10 +174,38 @@ function QualityTab({
   datasetId: number;
   initial: DatasetSummary["quality"];
   onRerunComplete: () => void;
-  }) {
+}) {
   const [report, setReport] = useState(initial);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 运营人员可针对当前数据集忽略特定规则（本地持久化，刷新不丢失）
+  const storageKey = `dc_ignored_rules_${datasetId}`;
+  const [ignoredRules, setIgnoredRules] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      return saved ? new Set<string>(JSON.parse(saved)) : new Set<string>();
+    } catch {
+      return new Set<string>();
+    }
+  });
+
+  function toggleIgnore(ruleKey: string) {
+    setIgnoredRules((prev) => {
+      const next = new Set(prev);
+      if (next.has(ruleKey)) {
+        next.delete(ruleKey);
+      } else {
+        next.add(ruleKey);
+      }
+      try {
+        localStorage.setItem(storageKey, JSON.stringify([...next]));
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  }
 
   async function rerun() {
     setRunning(true);
@@ -196,15 +224,18 @@ function QualityTab({
     return <div className="empty">质量报告未生成——重新上传即可获得</div>;
   }
 
-  const total = report.rules.length || 1;
-  const passed = report.rules.filter((r) => r.violations === 0).length;
+  const activeRules = report.rules.filter((r) => !ignoredRules.has(`${r.kind}:${r.column}`));
+  const total = activeRules.length;
+  const passed = activeRules.filter((r) => r.violations === 0).length;
+  const ignoredCount = report.rules.length - activeRules.length;
 
   return (
     <div className="grid gap-3.5">
       <div className="flex items-center gap-3 flex-wrap">
         <span className="chip chip-ok">{passed} 项通过</span>
         <span className="chip chip-warn">{total - passed} 项有违规</span>
-        <span className="text-muted text-[11.5px] mono">共 {total} 条规则</span>
+        {ignoredCount > 0 && <span className="chip text-[11px] text-muted bg-soft border-line">{ignoredCount} 项已忽略</span>}
+        <span className="text-muted text-[11.5px] mono">有效规则 {total} 条</span>
         <button type="button" className="btn-secondary ml-auto" onClick={() => void rerun()} disabled={running}>
           {running ? "重跑中…" : "重跑规则"}
         </button>
@@ -216,28 +247,55 @@ function QualityTab({
         </div>
       )}
 
-      {report.rules.map((r) => (
-        <RuleCard key={`${r.kind}:${r.column}:${r.pattern ?? ""}`} rule={r} />
-      ))}
+      {report.rules.map((r) => {
+        const key = `${r.kind}:${r.column}`;
+        return (
+          <RuleCard
+            key={`${key}:${r.pattern ?? ""}`}
+            rule={r}
+            ignored={ignoredRules.has(key)}
+            onToggleIgnore={() => toggleIgnore(key)}
+          />
+        );
+      })}
     </div>
   );
 }
 
-function RuleCard({ rule }: { rule: QualityRule }) {
+function RuleCard({
+  rule,
+  ignored,
+  onToggleIgnore,
+}: {
+  rule: QualityRule;
+  ignored: boolean;
+  onToggleIgnore: () => void;
+}) {
   const label = `${KIND_LABELS[rule.kind] ?? rule.kind} · ${rule.column}${rule.pattern ? `（${rule.pattern}）` : ""}`;
   return (
-    <div className={`card p-4 space-y-2 ${rule.violations === 0 ? "" : "border-warn-line"}`}>
+    <div className={`card p-4 space-y-2 transition-all ${ignored ? "opacity-55 bg-soft/25 border-line" : rule.violations === 0 ? "" : "border-warn-line"}`}>
       <div className="flex items-center gap-2">
-        <span className="font-[650] text-ink">{label}</span>
-        {rule.violations === 0 ? (
+        <span className={`font-[650] ${ignored ? "text-muted line-through" : "text-ink"}`}>{label}</span>
+        {ignored ? (
+          <span className="chip text-[11px] text-muted bg-soft border-line">已忽略</span>
+        ) : rule.violations === 0 ? (
           <span className="chip chip-ok">通过</span>
         ) : rule.violation_ratio >= 0.5 ? (
           <span className="chip chip-fail">{rule.violations} 处违规 · {pct(rule.violation_ratio)}</span>
         ) : (
           <span className="chip chip-warn">{rule.violations} 处违规 · {pct(rule.violation_ratio)}</span>
         )}
+        <div className="ml-auto">
+          <button
+            type="button"
+            className="text-[12px] text-muted hover:text-accent font-medium px-2 py-0.5 rounded hover:bg-soft"
+            onClick={onToggleIgnore}
+          >
+            {ignored ? "恢复规则" : "忽略此规则"}
+          </button>
+        </div>
       </div>
-      {rule.samples.length > 0 && (
+      {!ignored && rule.samples.length > 0 && (
         <div className="flex flex-col gap-1.5 pt-1">
           {rule.samples.map((s) => (
             <div key={s.row_index} className="mono text-[11.5px] text-muted">

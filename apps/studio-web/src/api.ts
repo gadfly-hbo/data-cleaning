@@ -113,7 +113,12 @@ async function json<T>(res: Response): Promise<T> {
   }
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
-    throw new Error(body.error ?? body.message ?? `HTTP ${res.status}`);
+    const errText =
+      (body.error && body.error !== "Internal Server Error" ? body.error : undefined) ??
+      body.message ??
+      body.error ??
+      `HTTP ${res.status}`;
+    throw new Error(errText);
   }
   return (await res.json()) as T;
 }
@@ -396,6 +401,7 @@ export interface LlmStatus {
   degraded?: boolean; // 配置了但 URL 畸形（区别于纯未配置）
   model: string | null;
   host: string | null;
+  provider?: string | null;
 }
 
 export async function getLlmStatus(): Promise<LlmStatus & { hint?: string }> {
@@ -420,4 +426,48 @@ export async function listVersions(datasetId: number): Promise<DatasetVersion[]>
     await fetch(`/api/datasets/${datasetId}/versions`),
   );
   return data.versions;
+}
+
+export interface AiCleaningPreviewResult {
+  code: string;
+  is_fallback: boolean;
+  preview: {
+    column: string;
+    is_split: boolean;
+    new_columns: string[];
+    rows: Array<{
+      row_index: number;
+      original: unknown;
+      result: unknown;
+    }>;
+  };
+}
+
+export async function aiPreviewCustomCleaning(
+  datasetId: number,
+  column: string,
+  prompt: string,
+): Promise<AiCleaningPreviewResult> {
+  return json<AiCleaningPreviewResult>(
+    await fetch(`/api/datasets/${datasetId}/ai/custom-cleaning/generate-preview`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column, prompt }),
+    }),
+  );
+}
+
+export async function aiApplyCustomCleaning(
+  datasetId: number,
+  column: string,
+  code: string,
+  action_name?: string,
+): Promise<DatasetSummary> {
+  return json<DatasetSummary>(
+    await fetch(`/api/datasets/${datasetId}/ai/custom-cleaning/apply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column, code, action_name }),
+    }),
+  );
 }

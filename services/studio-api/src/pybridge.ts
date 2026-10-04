@@ -1,6 +1,7 @@
 /** pybridge 子进程执行器：一次性 spawn，stdin JSON → stdout JSON，超时与非零退出转为结构化错误。 */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -13,6 +14,13 @@ export class PyBridgeExecutor {
   constructor(private readonly pythonBin: string = DEFAULT_PYTHON) {}
 
   run(task: unknown): Promise<unknown> {
+    if (!existsSync(this.pythonBin)) {
+      return Promise.reject(
+        new Error(
+          `后台 Python 计算环境尚未就绪（未找到 ${this.pythonBin}）。请在项目目录下执行 npm run setup:pybridge 初始化依赖。`
+        )
+      );
+    }
     return new Promise((resolve, reject) => {
       const child = spawn(this.pythonBin, ["-m", "pybridge"], {
         cwd: PYBRIDGE_DIR,

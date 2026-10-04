@@ -1,40 +1,23 @@
-/** LLM 清洗建议（M4/Q4）：OpenAI 兼容端点、可注入配置、输出白名单校验。
- *
- * 安全阀（PRD）：payload 只含列名/dtype/画像摘要/top 值 ≤8；输出 op 白名单
- * （core/mass-edit、core/text-transform）；请求响应不落盘不打日志（样本值可能敏感）。
- */
+import {
+  type AgentLlmConfig as LlmConfig,
+  type DiscoveredLlmConfig,
+  autoDiscoverLocalLlmConfig,
+  resolveLlmConfig,
+  executeAgentPrompt,
+} from "./agent/kernel.js";
 
-export interface LlmConfig {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  timeoutMs: number;
-}
+export {
+  type LlmConfig,
+  type DiscoveredLlmConfig,
+  autoDiscoverLocalLlmConfig,
+  resolveLlmConfig,
+};
 
 export interface SuggestionColumn {
   name: string;
   dtype: string;
   null_ratio: number;
   top_values: unknown[];
-}
-
-export function resolveLlmConfig(override?: Partial<LlmConfig>): LlmConfig | null {
-  const baseUrl = override?.baseUrl ?? process.env.LLM_BASE_URL;
-  const apiKey = override?.apiKey ?? process.env.LLM_API_KEY;
-  if (!baseUrl || !apiKey) return null;
-  try {
-    new URL(baseUrl);
-  } catch {
-    // 畸形 URL 降级为禁用（REVIEW 轮 2）：LLM 故障不应阻止 studio-api 启动（PRD story 4）
-    console.error(`[llm] LLM_BASE_URL is not a valid URL, suggestions disabled: ${baseUrl.slice(0, 60)}`);
-    return null;
-  }
-  return {
-    baseUrl: baseUrl.replace(/\/$/, ""),
-    apiKey,
-    model: override?.model ?? process.env.LLM_MODEL ?? "gpt-4o-mini",
-    timeoutMs: override?.timeoutMs ?? 30_000,
-  };
 }
 
 function buildPrompt(column: SuggestionColumn): string {
@@ -56,7 +39,7 @@ const ALLOWED_OPS = new Set(["core/mass-edit", "core/text-transform"]);
 
 /** 解析并校验模型输出；非法即抛（携带原始片段），不产出半合法建议。 */
 export function parseSuggestions(raw: string, expectedColumn: string): unknown[] {
-  let text = raw.trim();
+  let text = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
   if (fenced) text = fenced[1]!.trim();
   const start = text.indexOf("[");
@@ -104,34 +87,10 @@ export async function requestSuggestions(
   config: LlmConfig,
   column: SuggestionColumn,
 ): Promise<unknown[]> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
-  try {
-    const res = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [{ role: "user", content: buildPrompt(column) }],
-        temperature: 0,
-      }),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      throw new Error(`LLM endpoint HTTP ${res.status}`);
-    }
-    const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error("LLM response has no message content");
-    }
-    return parseSuggestions(content, column.name);
-  } finally {
-    clearTimeout(timer);
+  const prompt = buildPrompt(column);
+  const { text } = await executeAgentPrompt(config, prompt, { timeoutMs: config.timeoutMs });
+  if (!text) {
+    throw new Error("LLM response has no message content");
   }
+  return parseSuggestions(text, column.name);
 }

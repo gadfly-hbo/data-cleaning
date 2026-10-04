@@ -97,3 +97,29 @@ def test_rules_on_xlsx(tmp_path):
     assert report["row_count"] == 10
     assert by_key(report, "not_null", "phone")["violations"] == 1
     assert by_key(report, "unique", "name")["violations"] == 2
+
+
+def test_chinese_column_ruleset(tmp_path):
+    """验证中文业务表规则推断：款号应校验唯一，产品经理/产品季/中类/吊牌价等分类属性不强加唯一"""
+    csv = tmp_path / "semir.csv"
+    csv.write_text(
+        "款号,产品经理,产品季,中类,吊牌价,手机号\n"
+        "1001,男内搭(汤锦东),2026Q2,POLO衫,199,13800138000\n"
+        "1002,男内搭(汤锦东),2026Q2,短袖T恤,159,13800138001\n",
+        encoding="utf-8",
+    )
+    report = run_bridge({"task": "rules", "file": str(csv)})
+    rules = report["rules"]
+
+    # 款号：主键特征，应有 not_null 与 unique
+    assert any(r["kind"] == "not_null" and r["column"] == "款号" for r in rules)
+    assert any(r["kind"] == "unique" and r["column"] == "款号" for r in rules)
+
+    # 业务属性列：只应有 not_null，绝不强加 unique
+    for col in ("产品经理", "产品季", "中类", "吊牌价"):
+        assert any(r["kind"] == "not_null" and r["column"] == col for r in rules)
+        assert not any(r["kind"] == "unique" and r["column"] == col for r in rules), f"{col} 不应被强加 unique 规则"
+
+    # 手机号：应自动绑定 phone_cn 正则与 unique
+    assert any(r["kind"] == "regex" and r["column"] == "手机号" and r["pattern"] == "phone_cn" for r in rules)
+

@@ -18,6 +18,7 @@ from pybridge.loader import load_frame
 from pybridge.pipeline import run_pipeline, rows_page
 from pybridge.profile import profile
 from pybridge.rules import run_rules
+from pybridge.sandbox import execute_preview, execute_full
 
 
 def main() -> None:
@@ -36,6 +37,20 @@ def main() -> None:
             result = db_fetch(task)
         elif kind == "xlsx_to_csv":
             result = xlsx_to_csv(task["src"], task["dst"])
+        elif kind == "ai_preview":
+            df = load_frame(task["file"])
+            result = execute_preview(df, task["column"], task["code"], int(task.get("limit", 10)))
+        elif kind == "ai_apply":
+            df = load_frame(task["file"])
+            updated_df = execute_full(df, task["column"], task["code"])
+            # 导出 CSV 到目标路径
+            dst = task["dst"]
+            updated_df.write_csv(dst)
+            result = {
+                "success": True,
+                "rows": updated_df.height,
+                "columns": updated_df.columns,
+            }
         else:
             raise ValueError(f"unknown task: {kind!r}")
         json.dump(result, sys.stdout, ensure_ascii=False)

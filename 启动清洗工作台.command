@@ -21,12 +21,86 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
+# 检查并自动初始化后台引擎与 Python 计算依赖（实现首次启动或换机器 100% 自愈）
+if [ ! -f "pybridge/.venv/bin/python" ]; then
+  echo "[初始化] 首次运行：正在自动准备 Python 计算组件 (pybridge)…"
+  if command -v uv >/dev/null 2>&1; then
+    (cd pybridge && uv sync)
+  elif [ -f "$HOME/.cargo/bin/uv" ]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+    (cd pybridge && uv sync)
+  else
+    echo "[缺少环境] 未找到 uv 命令。请先安装 uv 或联系技术支持。"
+    exit 1
+  fi
+fi
+
+if [ ! -f "workspace/dist/openrefine-3.10.1/refine" ]; then
+  echo "[初始化] 首次运行：正在自动准备本地清洗引擎 (OpenRefine)…"
+  npm run setup:engine
+fi
+
 # 代码更新后自动重建前端：记录上次构建对应的提交，文件放 apps/studio-web/dist/（已 gitignore）
 BUILD_HEAD="$(git log -1 --format=%H -- apps/studio-web package.json 2>/dev/null || echo none)"
 if [ ! -f apps/studio-web/dist/index.html ] || [ "$(cat apps/studio-web/dist/.build-head 2>/dev/null)" != "$BUILD_HEAD" ]; then
   echo "[构建] 检测到界面代码更新（或首次运行），正在构建前端工作台…"
   npm run build:web
   echo "$BUILD_HEAD" > apps/studio-web/dist/.build-head
+fi
+
+# 模型凭证自动发现与注入（优先 MiniMax，备选 Xiaomi MIMO，不落仓不打印）
+if [ -z "$LLM_API_KEY" ]; then
+  MM=$(python3 - <<'PY' 2>/dev/null
+import json, os
+cfg_path = os.path.expanduser('~/.zcode/v2/config.json')
+if os.path.exists(cfg_path):
+    try:
+        cfg = json.load(open(cfg_path))
+        for p in (cfg.get('provider') or {}).values():
+            opts = p.get('options') or {}
+            base = str(opts.get('baseURL', ''))
+            name = str(p.get('name', ''))
+            if 'minimax' in base or 'minimax' in name.lower():
+                key = opts.get('apiKey', '')
+                if key:
+                    print(key)
+                    break
+    except Exception:
+        pass
+PY
+  )
+  if [ -z "$MM" ]; then
+    MM=$(python3 -c "import json,os;a=json.load(open(os.path.expanduser('~/.pi/agent/auth.json')));print(a.get('minimax-cn',{}).get('key',''))" 2>/dev/null)
+  fi
+
+  if [ -n "$MM" ]; then
+    export LLM_BASE_URL="https://api.minimax.cn/v1"
+    export LLM_API_KEY="$MM"
+    export LLM_MODEL="${LLM_MODEL:-MiniMax-M3}"
+  else
+    XM=$(python3 - <<'PY' 2>/dev/null
+import json, os
+cfg_path = os.path.expanduser('~/.zcode/v2/config.json')
+if os.path.exists(cfg_path):
+    try:
+        cfg = json.load(open(cfg_path))
+        for p in (cfg.get('provider') or {}).values():
+            opts = p.get('options') or {}
+            if 'xiaomimimo' in str(opts.get('baseURL', '')):
+                key = opts.get('apiKey', '')
+                if key:
+                    print(key)
+                    break
+    except Exception:
+        pass
+PY
+    )
+    if [ -n "$XM" ]; then
+      export LLM_BASE_URL="https://token-plan-cn.xiaomimimo.com/v1"
+      export LLM_API_KEY="$XM"
+      export LLM_MODEL="${LLM_MODEL:-mimo-v2.6-flash}"
+    fi
+  fi
 fi
 
 PORT="${PORT:-8787}"

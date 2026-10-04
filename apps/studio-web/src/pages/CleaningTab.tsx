@@ -15,6 +15,9 @@ import {
   exportCsv,
   getHistory,
   restoreHistory,
+  aiPreviewCustomCleaning,
+  aiApplyCustomCleaning,
+  type AiCleaningPreviewResult,
   type DatasetSummary,
   type History,
 } from "../api.js";
@@ -22,6 +25,7 @@ import { PreviewTable } from "./PreviewTable.js";
 import { ActionCards } from "./ActionCards.js";
 import { DiffPreviewPanel } from "./DiffPreviewPanel.js";
 import { CleaningReportModal } from "./CleaningReportModal.js";
+import { AiCleaningModal } from "./AiCleaningModal.js";
 import {
   humanizeHistoryDescription,
   type ActionCard,
@@ -53,7 +57,7 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
   const [promoteInterval, setPromoteInterval] = useState("");
   const [promoted, setPromoted] = useState<string | null>(null);
   const [promoteError, setPromoteError] = useState<string | null>(null);
-  const [llmStatus, setLlmStatus] = useState<{ enabled: boolean; degraded?: boolean; model: string | null; host: string | null } | null>(null);
+  const [llmStatus, setLlmStatus] = useState<{ enabled: boolean; degraded?: boolean; model: string | null; host: string | null; provider?: string | null } | null>(null);
   const [llmSuggestions, setLlmSuggestions] = useState<unknown[] | null>(null);
   const [llmChecked, setLlmChecked] = useState<Record<number, boolean>>({});
   const [llmBusy, setLlmBusy] = useState(false);
@@ -63,6 +67,20 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
   const [selectedCard, setSelectedCard] = useState<ActionCard | null>(null);
   const [cardInput, setCardInput] = useState<string>("");
   const [showReport, setShowReport] = useState<boolean>(false);
+
+  // 面向长尾业务的 AI 自然语言定制清洗状态
+  const [aiPrompt, setAiPrompt] = useState<string>("");
+  const [aiBusy, setAiBusy] = useState<boolean>(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiPreviewData, setAiPreviewData] = useState<AiCleaningPreviewResult | null>(null);
+  const [aiCustomCards, setAiCustomCards] = useState<Array<{ name: string; prompt: string; code: string }>>(() => {
+    try {
+      const saved = localStorage.getItem(`dc_custom_cards_${dataset.id}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // 操作面板状态
   const [column, setColumn] = useState("");
@@ -259,6 +277,47 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
     }
   }
 
+  async function handleAiGeneratePreview(customPrompt?: string) {
+    const promptToUse = (customPrompt ?? aiPrompt).trim();
+    if (!promptToUse || !column) return;
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      const res = await aiPreviewCustomCleaning(dataset.id, column, promptToUse);
+      setAiPreviewData(res);
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function handleAiApply(code: string, actionName: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await aiApplyCustomCleaning(dataset.id, column, code, actionName);
+      const newCard = { name: actionName, prompt: aiPrompt, code };
+      setAiCustomCards((prev) => {
+        const next = [newCard, ...prev.filter((c) => c.name !== actionName)];
+        try {
+          localStorage.setItem(`dc_custom_cards_${dataset.id}`, JSON.stringify(next));
+        } catch {
+          // ignore
+        }
+        return next;
+      });
+      setAiPreviewData(null);
+      setAiPrompt("");
+      setPreviewKey((k) => k + 1);
+      window.location.reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function restore(lastDoneID: number) {
     await guarded(async () => {
       await restoreHistory(dataset.id, lastDoneID);
@@ -277,6 +336,104 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
 
   return (
     <div className="grid gap-4">
+      {/* AI 自然语言定制清洗助手（本地数据不进 LLM） */}
+      <div className="card p-4 border border-accent-line/70 bg-accent-soft/20 space-y-3" data-testid="ai-custom-cleaning-panel">
+        <div className="flex items-center justify-between gap-2 flex-wrap border-b border-accent-line/40 pb-2.5">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">✨</span>
+            <div>
+              <span className="font-[650] text-ink text-[14px]">AI 自然语言清洗助手</span>
+              <span className="ml-2 text-muted text-[11.5px]">
+                输入大白话需求，AI 现场编写 Python 逻辑并在本机试跑 · 0 字节明细数据外传
+              </span>
+            </div>
+          </div>
+          <span className="chip text-[11px] text-accent bg-surface border-accent-line font-medium">
+            🔒 本地私有计算
+          </span>
+        </div>
+
+        <div className="grid gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="min-w-[180px]">
+              <label className="text-muted text-[11px] font-medium block mb-1">目标列</label>
+              <select
+                className="fld border border-line rounded-[7px] bg-surface px-2.5 py-1.5 text-[12.5px] text-ink w-full"
+                value={column}
+                disabled={busy || aiBusy}
+                onChange={(e) => setColumn(e.target.value)}
+              >
+                {(dataset.profile?.columns ?? []).map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name} ({c.dtype})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex-1 min-w-[280px]">
+              <label className="text-muted text-[11px] font-medium block mb-1">
+                清洗需求（自然语言）
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  className="fld border border-line rounded-[7px] bg-surface px-3 py-1.5 text-[13px] text-ink flex-1"
+                  placeholder="例如：拆分为开始与结束日期 / 提取括号中的姓名 / 将千分位转为纯数字"
+                  value={aiPrompt}
+                  disabled={busy || aiBusy}
+                  onChange={(e) => setAiPrompt(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !aiBusy) {
+                      e.preventDefault();
+                      void handleAiGeneratePreview();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn-primary !text-[12.5px] !py-1.5 !px-4 shrink-0 flex items-center gap-1.5"
+                  onClick={() => void handleAiGeneratePreview()}
+                  disabled={busy || aiBusy || !aiPrompt.trim()}
+                >
+                  <span>{aiBusy ? "AI 试跑中…" : "✨ AI 分析并试跑"}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* 常用灵感快捷推荐 */}
+          <div className="flex items-center gap-2 flex-wrap pt-0.5">
+            <span className="text-[11.5px] text-muted font-medium">灵感推荐：</span>
+            {[
+              "把时间段拆分成开始日期和结束日期",
+              "提取括号中的姓名",
+              "去除两端所有特殊符号与空格",
+              "提取数字金额并转为纯数字",
+            ].map((hint) => (
+              <button
+                key={hint}
+                type="button"
+                className="text-[11.5px] bg-surface border border-line rounded-full px-2.5 py-0.5 text-muted hover:text-accent hover:border-accent-line transition-all"
+                onClick={() => {
+                  setAiPrompt(hint);
+                  void handleAiGeneratePreview(hint);
+                }}
+                disabled={busy || aiBusy}
+              >
+                + {hint}
+              </button>
+            ))}
+          </div>
+
+          {aiError && (
+            <div className="p-2.5 bg-fail-soft border border-fail-line rounded-[7px] text-fail text-[12px]">
+              AI 试跑异常：{aiError}
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* 顶部常用业务清洗卡片区（面向非技术运营同学） */}
       <div className="card p-4 border border-line bg-surface" data-testid="common-actions-panel">
         <div className="flex items-center justify-between gap-2 flex-wrap mb-3.5 border-b border-line pb-2.5">
@@ -627,7 +784,7 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
           <span className="font-semibold">AI 清洗建议</span>
           {llmStatus?.enabled ? (
             <span className="chip chip-accent" data-testid="llm-boundary">
-              启用中：列名与样本值将发送到 {llmStatus.host}（{llmStatus.model}）
+              {llmStatus.provider ? `[${llmStatus.provider}] ` : ""}启用中：列名与样本值将发送到 {llmStatus.host}（{llmStatus.model}）
             </span>
           ) : (
             <span className="chip bg-surface-2 text-text-2 border-border">未配置</span>
@@ -766,6 +923,17 @@ export function CleaningTab({ dataset }: { dataset: DatasetSummary }) {
           onExportCsv={() =>
             void exportCsv(dataset.id, dataset.name).catch((e: Error) => setError(e.message))
           }
+        />
+      )}
+
+      {aiPreviewData && (
+        <AiCleaningModal
+          column={column}
+          userPrompt={aiPrompt}
+          previewResult={aiPreviewData}
+          busy={busy}
+          onClose={() => setAiPreviewData(null)}
+          onApply={handleAiApply}
         />
       )}
     </div>

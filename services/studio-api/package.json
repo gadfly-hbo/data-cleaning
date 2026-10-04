@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@data-cleaning/adapter-openrefine": "*",
+    "@earendil-works/pi-ai": "^0.86.1",
     "@fastify/multipart": "^9.0.0",
     "@fastify/static": "^8.0.0",
     "@node-rs/argon2": "^2.2.1",

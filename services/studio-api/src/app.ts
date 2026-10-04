@@ -65,6 +65,7 @@ import {
   hashPassword, validatePassword, validateUsername, verifyPassword,
 } from "./auth.js";
 import { requestSuggestions, resolveLlmConfig, type LlmConfig, type SuggestionColumn } from "./llm.js";
+import { generateCleaningCode } from "./ai-cleaning.js";
 
 // V5-④：login 对不存在用户做恒时哑 verify 的哈希常量（真实 argon2id 参数形态）
 const DUMMY_ARGON2_HASH = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -176,6 +177,19 @@ export async function buildApp(opts: AppOptions = {}) {
 
   const app = fastify({ logger: false });
   await app.register(multipart, { limits: { fileSize: MAX_UPLOAD_BYTES } });
+
+  app.setErrorHandler((error, request, reply) => {
+    const statusCode =
+      typeof error.statusCode === "number" && error.statusCode >= 400 && error.statusCode < 600
+        ? error.statusCode
+        : 500;
+    const message = error.message || "服务器内部错误";
+    reply.status(statusCode).send({
+      statusCode,
+      error: message,
+      message,
+    });
+  });
 
   // ===== 审计日志查询（M7/V3 建；M8/V1 扩展：过滤 + total + 非 admin 自查收敛）=====
 
@@ -629,7 +643,16 @@ export async function buildApp(opts: AppOptions = {}) {
     // （K2 幂等：内容寻址目录下已存在即跳过）；raw 版本仍存 xlsx 原件（不可变字节）
     const engineFile = ext === ".xlsx" ? path.join(rawDir, "engine.csv") : rawPath;
     if (ext === ".xlsx" && !existsSync(engineFile)) {
-      await runPybridge({ task: "xlsx_to_csv", src: rawPath, dst: engineFile });
+      try {
+        await runPybridge({ task: "xlsx_to_csv", src: rawPath, dst: engineFile });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return reply.code(500).send({
+          statusCode: 500,
+          error: `Excel 文件解析失败：${msg}`,
+          message: `Excel 文件解析失败：${msg}`,
+        });
+      }
     }
     const client = await engineManager.ensureEngine();
     const projectId = await client.createProject(engineFile, name);
@@ -744,6 +767,125 @@ export async function buildApp(opts: AppOptions = {}) {
     const entries = await client.applyOperations(rec.project_id, body.operations);
     audit(req, "operations_apply", "dataset", rec.id, { count: body.operations.length });
     return { entries, history: await client.getHistory(rec.project_id) };
+  });
+
+  // ===== AI 自定义清洗（本地数据不进 LLM） =====
+
+  app.post("/api/datasets/:id/ai/custom-cleaning/generate-preview", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = writableDataset(req, Number(id));
+    if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
+
+    const body = req.body as { column?: string; prompt?: string } | null | undefined;
+    if (!body?.column || !body?.prompt) {
+      return reply.code(400).send({ error: "missing column or prompt" });
+    }
+
+    // 安全围栏：从画像或首行提取最多 2 个非空安全样本，明细绝不批量外传
+    const colProfile = rec.profile?.columns.find((c) => c.name === body.column);
+    const topValues = colProfile?.top_values.map((v) => v.value) ?? [];
+
+    const { code, isFallback } = await generateCleaningCode(llmConfig, {
+      column: body.column,
+      dtype: colProfile?.dtype ?? "string",
+      userPrompt: body.prompt,
+      samples: topValues,
+    });
+
+    // 本地沙箱执行前 10 行试跑
+    try {
+      const preview = await runPybridge({
+        task: "ai_preview",
+        file: rec.file_path,
+        column: body.column,
+        code,
+        limit: 10,
+      });
+      return {
+        code,
+        is_fallback: isFallback,
+        preview,
+      };
+    } catch (err) {
+      return reply.code(400).send({
+        error: `AI 生成的代码在本地试跑失败: ${err instanceof Error ? err.message : String(err)}`,
+        code,
+      });
+    }
+  });
+
+  app.post("/api/datasets/:id/ai/custom-cleaning/apply", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const rec = writableDataset(req, Number(id));
+    if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
+
+    const body = req.body as { column?: string; code?: string; action_name?: string } | null | undefined;
+    if (!body?.column || !body?.code) {
+      return reply.code(400).send({ error: "missing column or code" });
+    }
+
+    ensureRawVersion(db, rec);
+    const versions = listVersions(db, rec.id);
+    const nextVer = (versions[0]?.version ?? 1) + 1;
+    const verDir = path.join(workspace, "versions", String(rec.id));
+    mkdirSync(verDir, { recursive: true });
+    const targetFile = path.join(verDir, `v${nextVer}.csv`);
+
+    try {
+      const result = (await runPybridge({
+        task: "ai_apply",
+        file: rec.file_path,
+        column: body.column,
+        code: body.code,
+        dst: targetFile,
+      })) as { success: boolean; rows: number; columns: string[] };
+
+      // 更新或重建 OpenRefine 项目
+      const client = await engineManager.ensureEngine();
+      let newProjectId = rec.project_id;
+      try {
+        newProjectId = await client.createProject(targetFile, `${rec.name}_v${nextVer}`);
+        await client.deleteProject(rec.project_id).catch(() => undefined);
+      } catch {
+        // 引擎项目重置降级
+      }
+
+      // 重新生成画像与跑分
+      const newProfile = await runPybridge({ task: "profile", file: targetFile }).catch(() => null);
+      const newQuality = await runPybridge({ task: "rules", file: targetFile }).catch(() => null);
+
+      db.prepare(
+        "UPDATE datasets SET file_path = ?, project_id = ?, row_count = ?, columns_json = ?, profile_json = ?, quality_json = ? WHERE id = ?",
+      ).run(
+        targetFile,
+        newProjectId,
+        result.rows,
+        JSON.stringify(result.columns),
+        newProfile ? JSON.stringify(newProfile) : null,
+        newQuality ? JSON.stringify(newQuality) : null,
+        rec.id,
+      );
+
+      insertVersion(db, {
+        dataset_id: rec.id,
+        kind: "ai_custom",
+        file_path: targetFile,
+        source_run_id: null,
+        rows: result.rows,
+      });
+
+      audit(req, "ai_cleaning_apply", "dataset", rec.id, {
+        column: body.column,
+        action_name: body.action_name ?? "AI 定制清洗",
+        new_columns: result.columns,
+      });
+
+      return toApi(getDataset(db, rec.id)!);
+    } catch (err) {
+      return reply.code(500).send({
+        error: `本地应用清洗失败: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   });
 
   app.get("/api/datasets/:id/history", async (req, reply) => {
@@ -1135,6 +1277,7 @@ export async function buildApp(opts: AppOptions = {}) {
     enabled: llmConfig !== null,
     degraded: llmDegraded,
     model: llmConfig?.model ?? null,
+    provider: llmConfig?.provider ?? null,
     // 只暴露 host（边界声明用），不暴露 key/路径
     host: llmConfig ? new URL(llmConfig.baseUrl).host : null,
   }));

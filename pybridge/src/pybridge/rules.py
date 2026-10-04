@@ -33,14 +33,66 @@ _NAME_KEYWORD_BINDINGS: list[tuple[str, str]] = [
     ("tel", "phone_cn"),
     ("date", "date_iso"),
     ("time", "date_iso"),
+    # 中文列名关键词智能绑定
+    ("手机", "phone_cn"),
+    ("电话", "phone_cn"),
+    ("邮箱", "email"),
+    ("网址", "url"),
+    ("链接", "url"),
+    ("日期", "date_iso"),
 ]
+
+# 中文主键/唯一标识特征词：款号、单号、条码、唯一标识等
+_CJK_UNIQUE_KEYWORDS = [
+    "款号", "货号", "单号", "订单号", "流水号", "工号", "账号", "学号", "卡号",
+    "编号", "编码", "代码", "条码", "条形码", "主键", "唯一", "身份证", "手机",
+]
+
+# 中文维度/分类/指标/人员排除词（天然允许多行复用，绝不默认加 unique）
+_CJK_NON_UNIQUE_EXCLUSIONS = [
+    "经理", "员工", "人员", "客户", "人", "员",
+    "季", "季度", "年", "月", "日", "期", "时间", "段",
+    "类", "类别", "类型", "型", "品类", "分类",
+    "价", "价格", "金额", "费", "成本", "利润",
+    "率", "比", "比例",
+    "数", "量", "数量", "人数",
+    "状态", "城市", "省", "市", "区",
+    "描述", "备注", "说明", "名称",
+    "品牌", "部门", "职务", "岗位", "组",
+    "性别", "规格", "颜色", "尺码",
+]
+
+
+def _has_cjk(s: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fa5" for ch in s)
+
+
+def _should_check_unique(col: str) -> bool:
+    if not _has_cjk(col):
+        # 英文列名：兼容既有英文测试夹具与英文数据表
+        return True
+
+    # 1. 优先匹配明确的主键唯一标识词（如“工号”虽含“工”，但为唯一标识）
+    if any(k in col for k in _CJK_UNIQUE_KEYWORDS):
+        return True
+    if col.endswith("号") and col not in ("口号", "符号", "标号", "问号", "句号", "括号"):
+        return True
+
+    # 2. 命中属性/维度/指标/人员排除词，一律不默认判定唯一
+    for word in _CJK_NON_UNIQUE_EXCLUSIONS:
+        if word in col:
+            return False
+
+    # 3. 其余普通中文列不假定唯一（避免假阳性干扰）
+    return False
 
 
 def default_ruleset(columns: list[str]) -> list[dict]:
     rules: list[dict] = []
     for col in columns:
         rules.append({"kind": "not_null", "column": col})
-        rules.append({"kind": "unique", "column": col})
+        if _should_check_unique(col):
+            rules.append({"kind": "unique", "column": col})
         low = col.lower()
         for keyword, pattern in _NAME_KEYWORD_BINDINGS:
             if keyword in low:

@@ -20,8 +20,8 @@ const GOOD = [
   },
 ];
 
-function completion(content: string) {
-  return JSON.stringify({ choices: [{ message: { content } }] });
+function sseCompletion(content: string) {
+  return `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`;
 }
 
 let stubServer: Server;
@@ -40,13 +40,13 @@ beforeAll(async () => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
       res.end(
         stubMode === "good"
-          ? completion(JSON.stringify(GOOD))
+          ? sseCompletion(JSON.stringify(GOOD))
           : stubMode === "wrong-column"
-            ? completion(JSON.stringify([{ ...GOOD[0], columnName: "别的列" }]))
-            : completion("我觉得你应该先手工看看数据再说。"),
+            ? sseCompletion(JSON.stringify([{ ...GOOD[0], columnName: "别的列" }]))
+            : sseCompletion("我觉得你应该先手工看看数据再说。"),
       );
     });
   });
