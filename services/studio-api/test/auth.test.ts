@@ -157,3 +157,30 @@ test("argon2 session key file created with strict permissions", () => {
   const keyPath = path.join(WORKSPACE, ".session-key");
   expect(readFileSync(keyPath, "utf-8").trim()).toMatch(/^[0-9a-f]{64}$/);
 });
+
+test("localAuthBypass mode: unauthenticated requests auto-granted admin, setup not needed", async () => {
+  const bypassWs = mkdtempSync(path.join(tmpdir(), "studio-bypass-"));
+  const bypassApp = await buildApp({ workspaceDir: bypassWs, enableScheduler: false, localAuthBypass: true });
+  await bypassApp.listen({ port: 0, host: "127.0.0.1" });
+  const a = bypassApp.server.address();
+  const base = typeof a === "object" && a ? `http://127.0.0.1:${a.port}` : "";
+
+  // 1. 不需要 setup
+  const statusRes = await fetch(`${base}/api/auth/setup-status`);
+  const status = (await statusRes.json()) as { needs_setup: boolean };
+  expect(status.needs_setup).toBe(false);
+
+  // 2. 无任何 cookie/header 直接访问 /api/auth/me 即为 admin
+  const meRes = await fetch(`${base}/api/auth/me`);
+  expect(meRes.status).toBe(200);
+  const me = (await meRes.json()) as { username: string; role: string };
+  expect(me.username).toBe("admin");
+  expect(me.role).toBe("admin");
+
+  // 3. 无任何 cookie/header 直接访问受保护的业务接口 /api/datasets 返回 200 而非 401
+  const dsRes = await fetch(`${base}/api/datasets`);
+  expect(dsRes.status).toBe(200);
+
+  await bypassApp.close();
+});
+

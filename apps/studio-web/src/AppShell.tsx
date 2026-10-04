@@ -82,7 +82,7 @@ export function AppShell() {
               <button
                 type="button"
                 className="btn-ghost !px-2.5 !py-1 text-[11.5px]"
-                onClick={() => void logout().then(() => { window.location.href = "/login"; })}
+                onClick={() => void logout().then(() => { window.location.href = "/"; })}
               >
                 登出
               </button>

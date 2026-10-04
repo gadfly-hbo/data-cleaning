@@ -1,20 +1,18 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { createBrowserRouter, RouterProvider } from "react-router-dom";
+import { createBrowserRouter, Navigate, RouterProvider } from "react-router-dom";
 import { AppShell } from "./AppShell.js";
 import { UploadPage } from "./pages/UploadPage.js";
 import { PipelinesPage } from "./pages/PipelinesPage.js";
 import { DataSourcePage } from "./pages/DataSourcePage.js";
 import { AuditPage } from "./pages/AuditPage.js";
-import { LoginPage, SetupPage } from "./pages/AuthPages.js";
-import { ChangePasswordPage } from "./pages/ChangePasswordPage.js";
 import { DatasetPage } from "./pages/DatasetPage.js";
 import "./index.css";
 
 const router = createBrowserRouter([
-  { path: "/login", element: <LoginPage /> },
-  { path: "/setup", element: <SetupPage /> },
-  { path: "/change-password", element: <ChangePasswordPage /> },
+  { path: "/login", element: <Navigate to="/" replace /> },
+  { path: "/setup", element: <Navigate to="/" replace /> },
+  { path: "/change-password", element: <Navigate to="/" replace /> },
   {
     element: <AppShell />,
     children: [

@@ -438,6 +438,32 @@ export function insertUser(
   return { id: Number(r.lastInsertRowid), username, role, disabled: false, created_at: now, must_change_password: false };
 }
 
+/** 本地单机免密模式：自动初始化本地默认管理员并回填存量数据归属（供运营人员即开即用） */
+export function ensureDefaultAdmin(db: DatabaseSync): UserRecord {
+  ensureMustChangeColumn(db);
+  const existing = db
+    .prepare("SELECT * FROM users WHERE role = 'admin' AND disabled = 0 ORDER BY id LIMIT 1")
+    .get() as Record<string, unknown> | undefined;
+  if (existing) {
+    return toUser(existing);
+  }
+  const now = new Date().toISOString();
+  const defaultHash = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const r = db
+    .prepare("INSERT INTO users (username, password_hash, role, disabled, created_at, must_change_password) VALUES (?, ?, ?, 0, ?, 0)")
+    .run("admin", defaultHash, "admin", now);
+  const user: UserRecord = {
+    id: Number(r.lastInsertRowid),
+    username: "admin",
+    role: "admin",
+    disabled: false,
+    created_at: now,
+    must_change_password: false,
+  };
+  backfillOwnerToAdmin(db);
+  return user;
+}
+
 export function getUserByName(db: DatabaseSync, username: string): (UserRecord & { password_hash: string }) | null {
   const row = db
     .prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE")
