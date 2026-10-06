@@ -64,8 +64,14 @@ import {
   SESSION_COOKIE, SESSION_TTL_MS, SessionKey,
   hashPassword, validatePassword, validateUsername, verifyPassword,
 } from "./auth.js";
-import { requestSuggestions, resolveLlmConfig, type LlmConfig, type SuggestionColumn } from "./llm.js";
-import { generateCleaningCode } from "./ai-cleaning.js";
+import { requestSuggestions, resolveLlmConfig, setAuditPersistHandler, type LlmConfig, type SuggestionColumn } from "./llm.js";
+
+import {
+  generateCleaningCode,
+  executeCloudSemanticCleaning,
+  generateMappingPythonCode,
+  FIXED_RULES,
+} from "./ai-cleaning.js";
 
 // V5-④：login 对不存在用户做恒时哑 verify 的哈希常量（真实 argon2id 参数形态）
 const DUMMY_ARGON2_HASH = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -137,6 +143,26 @@ export async function buildApp(opts: AppOptions = {}) {
   const llmRequested = Boolean(opts.llm?.baseUrl || process.env.LLM_BASE_URL);
   const llmConfig = resolveLlmConfig(opts.llm);
   const llmDegraded = llmRequested && llmConfig === null; // 配置了但畸形 URL（M4 清偿③补全）
+
+  if (db) {
+    setAuditPersistHandler((record) => {
+      try {
+        insertAudit(
+          db,
+          1,
+          "system",
+          "agent_runtime_call",
+          "agent_runtime",
+          `${record.provider}:${record.model}`,
+          record,
+        );
+      } catch (err) {
+        console.error("[audit] failed to persist agent runtime record:", err);
+      }
+    });
+  }
+
+
   // 孤儿清扫（M4/Q2，K7）：首次引擎就绪后，删除无 dataset 行引用且 pipeline-temp 前缀的项目
   engineManager.onFirstReady(() => {
     void (async () => {
@@ -771,26 +797,122 @@ export async function buildApp(opts: AppOptions = {}) {
 
   // ===== AI 自定义清洗（本地数据不进 LLM） =====
 
+  app.get("/api/datasets/:id/ai/custom-cleaning/rules", async () => {
+    return { rules: FIXED_RULES };
+  });
+
   app.post("/api/datasets/:id/ai/custom-cleaning/generate-preview", async (req, reply) => {
     const { id } = req.params as { id: string };
     const rec = writableDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
 
-    const body = req.body as { column?: string; prompt?: string } | null | undefined;
-    if (!body?.column || !body?.prompt) {
-      return reply.code(400).send({ error: "missing column or prompt" });
+    const body = req.body as {
+      column?: string;
+      prompt?: string;
+      mode?: "ai" | "rule";
+      rule_key?: string;
+      allow_cloud?: boolean;
+    } | null | undefined;
+
+    if (!body?.column) {
+      return reply.code(400).send({ error: "missing column" });
     }
 
-    // 安全围栏：从画像或首行提取最多 2 个非空安全样本，明细绝不批量外传
+    const mode = body.mode ?? (body.rule_key ? "rule" : (llmConfig ? "ai" : "rule"));
+    if (mode === "ai" && !body.prompt?.trim()) {
+      return reply.code(400).send({ error: "请输入自然语言清洗需求" });
+    }
+    if (mode === "rule" && !body.rule_key && !body.prompt?.trim()) {
+      return reply.code(400).send({ error: "请选择固定清洗规则或输入清洗需求" });
+    }
+
+    // 分支 1：已勾选允许外发大模型（云端语义清洗模式，支持跨语言翻译等）
+    if (mode === "ai" && body.allow_cloud) {
+      if (!llmConfig) {
+        return reply.code(400).send({
+          error: "未配置 AI 模型凭证（未发现 MiniMax / MIMO 凭证），无法使用云端大模型语义清洗。请配置服务端凭证或使用固定规则。",
+        });
+      }
+
+      // 获取前 10 行样本原值
+      let sampleVals: unknown[] = [];
+      try {
+        const rowsPage = (await runPybridge({
+          task: "rows",
+          file: rec.file_path,
+          offset: 0,
+          limit: 10,
+        })) as { columns: string[]; rows: unknown[][] };
+        const colIdx = rowsPage.columns.indexOf(body.column);
+        sampleVals = colIdx >= 0 ? rowsPage.rows.map((r) => r[colIdx]) : [];
+      } catch {
+        const colProfile = rec.profile?.columns.find((c) => c.name === body.column);
+        sampleVals = colProfile?.top_values.map((v) => v.value) ?? [];
+      }
+
+      let mapping: Map<unknown, unknown>;
+      try {
+        mapping = await executeCloudSemanticCleaning(llmConfig, {
+          column: body.column,
+          userPrompt: body.prompt ?? "",
+          values: sampleVals,
+        });
+      } catch (err) {
+        return reply.code(400).send({
+          error: `云端大模型语义清洗失败: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+
+      let is_split = false;
+      const new_columns_set = new Set<string>();
+      const preview_rows = sampleVals.map((orig, i) => {
+        let res = mapping.get(orig);
+        if (res === undefined) res = orig;
+        if (typeof res === "object" && res !== null && !Array.isArray(res)) {
+          is_split = true;
+          Object.keys(res as Record<string, unknown>).forEach((k) => new_columns_set.add(k));
+        }
+        return {
+          row_index: i,
+          original: orig,
+          result: res,
+        };
+      });
+
+      const preview = {
+        column: body.column,
+        is_split,
+        new_columns: is_split ? Array.from(new_columns_set) : [body.column],
+        rows: preview_rows,
+      };
+      const code = generateMappingPythonCode(body.column, body.prompt ?? "", mapping);
+      return {
+        code,
+        is_fallback: false,
+        is_cloud_llm: true,
+        preview,
+      };
+    }
+
+    // 分支 2：本地离线沙箱模式（0 字节外传；遇翻译等任务将明确报错拦截）
     const colProfile = rec.profile?.columns.find((c) => c.name === body.column);
     const topValues = colProfile?.top_values.map((v) => v.value) ?? [];
 
-    const { code, isFallback } = await generateCleaningCode(llmConfig, {
-      column: body.column,
-      dtype: colProfile?.dtype ?? "string",
-      userPrompt: body.prompt,
-      samples: topValues,
-    });
+    let generated: { code: string; isFallback: boolean };
+    try {
+      generated = await generateCleaningCode(llmConfig, {
+        column: body.column,
+        dtype: colProfile?.dtype ?? "string",
+        userPrompt: body.prompt ?? "",
+        samples: topValues,
+        mode,
+        ruleKey: body.rule_key,
+        allowCloud: false,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return reply.code(400).send({ error: msg });
+    }
 
     // 本地沙箱执行前 10 行试跑
     try {
@@ -798,18 +920,19 @@ export async function buildApp(opts: AppOptions = {}) {
         task: "ai_preview",
         file: rec.file_path,
         column: body.column,
-        code,
+        code: generated.code,
         limit: 10,
       });
       return {
-        code,
-        is_fallback: isFallback,
+        code: generated.code,
+        is_fallback: generated.isFallback,
+        is_cloud_llm: false,
         preview,
       };
     } catch (err) {
       return reply.code(400).send({
-        error: `AI 生成的代码在本地试跑失败: ${err instanceof Error ? err.message : String(err)}`,
-        code,
+        error: `生成的 Python 代码在本地试跑失败: ${err instanceof Error ? err.message : String(err)}`,
+        code: generated.code,
       });
     }
   });
@@ -819,7 +942,13 @@ export async function buildApp(opts: AppOptions = {}) {
     const rec = writableDataset(req, Number(id));
     if (!rec) return reply.code(404).send({ error: `dataset ${id} not found` });
 
-    const body = req.body as { column?: string; code?: string; action_name?: string } | null | undefined;
+    const body = req.body as {
+      column?: string;
+      code?: string;
+      action_name?: string;
+      allow_cloud?: boolean;
+      prompt?: string;
+    } | null | undefined;
     if (!body?.column || !body?.code) {
       return reply.code(400).send({ error: "missing column or code" });
     }
@@ -832,11 +961,37 @@ export async function buildApp(opts: AppOptions = {}) {
     const targetFile = path.join(verDir, `v${nextVer}.csv`);
 
     try {
+      let codeToRun = body.code;
+      // 若是云端大模型模式，补齐所有唯一值的翻译并更新映射
+      if ((body.allow_cloud || body.code.includes("SEMANTIC_MAPPING")) && llmConfig) {
+        try {
+          const uniqueVals = (await runPybridge({
+            task: "distinct_values",
+            file: rec.file_path,
+            column: body.column,
+          })) as unknown[];
+          if (Array.isArray(uniqueVals) && uniqueVals.length > 0) {
+            const mapping = await executeCloudSemanticCleaning(llmConfig, {
+              column: body.column,
+              userPrompt: body.prompt || body.action_name || "",
+              values: uniqueVals,
+            });
+            codeToRun = generateMappingPythonCode(
+              body.column,
+              body.prompt || body.action_name || "",
+              mapping,
+            );
+          }
+        } catch (err) {
+          console.warn("[ai-cleaning] batch semantic mapping fallback to existing code:", err);
+        }
+      }
+
       const result = (await runPybridge({
         task: "ai_apply",
         file: rec.file_path,
         column: body.column,
-        code: body.code,
+        code: codeToRun,
         dst: targetFile,
       })) as { success: boolean; rows: number; columns: string[] };
 
@@ -1280,7 +1435,15 @@ export async function buildApp(opts: AppOptions = {}) {
     provider: llmConfig?.provider ?? null,
     // 只暴露 host（边界声明用），不暴露 key/路径
     host: llmConfig ? new URL(llmConfig.baseUrl).host : null,
+    fallback: llmConfig?.fallback
+      ? {
+          model: llmConfig.fallback.model ?? null,
+          provider: llmConfig.fallback.provider ?? null,
+          host: new URL(llmConfig.fallback.baseUrl).host,
+        }
+      : null,
   }));
+
 
   app.post("/api/datasets/:id/suggest", async (req, reply) => {
     if (!llmConfig) {

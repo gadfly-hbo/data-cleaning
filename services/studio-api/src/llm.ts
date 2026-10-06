@@ -4,6 +4,8 @@ import {
   autoDiscoverLocalLlmConfig,
   resolveLlmConfig,
   executeAgentPrompt,
+  setAuditPersistHandler,
+  getAgentAuditRecords,
 } from "./agent/kernel.js";
 
 export {
@@ -11,7 +13,10 @@ export {
   type DiscoveredLlmConfig,
   autoDiscoverLocalLlmConfig,
   resolveLlmConfig,
+  setAuditPersistHandler,
+  getAgentAuditRecords,
 };
+
 
 export interface SuggestionColumn {
   name: string;
@@ -28,9 +33,9 @@ function buildPrompt(column: SuggestionColumn): string {
     `高频值（最多 8 个）：${JSON.stringify(column.top_values.slice(0, 8))}`,
     "",
     "请针对该列给出最多 3 条清洗建议。只输出一个 JSON 数组，不要任何解释文字或代码围栏。",
-    '每个元素是 OpenRefine 操作对象，op 只允许 "core/mass-edit" 或 "core/text-transform"：',
-    '{"op":"core/mass-edit","engineConfig":{"facets":[],"mode":"row-based"},"columnName":"<列名>","expression":"value","edits":[{"from":["<旧值>"],"to":"<新值>"}]}',
-    '{"op":"core/text-transform","engineConfig":{"facets":[],"mode":"row-based"},"columnName":"<列名>","expression":"<GREL 表达式，如 value.trim()>","onError":"keep-original"}',
+    '每个元素是 OpenRefine 操作对象，op 只允许 "core/mass-edit" 或 "core/text-transform"，且附带 "description" 字段（用通俗易懂的中文自然语言说明该项建议的目的与效果）：',
+    '{"op":"core/mass-edit","engineConfig":{"facets":[],"mode":"row-based"},"columnName":"<列名>","description":"<自然语言描述，如：将「茄克」统一更正为规范词「夹克」>","expression":"value","edits":[{"from":["<旧值>"],"to":"<新值>"}]}',
+    '{"op":"core/text-transform","engineConfig":{"facets":[],"mode":"row-based"},"columnName":"<列名>","description":"<自然语言描述，如：去除文本两端多余空格与不可见空白>","expression":"<GREL 表达式，如 value.trim()>","onError":"keep-original"}',
     `columnName 必须是 "${column.name}"。`,
   ].join("\n");
 }
